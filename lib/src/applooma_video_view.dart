@@ -1,23 +1,23 @@
 import 'package:flutter/widgets.dart';
 import 'package:livekit_client/livekit_client.dart' as lk;
 
-import 'lio_engine.dart';
+import 'applooma_engine.dart';
 
-/// Renders a user's video. Use [LioVideoView.local] for the local preview.
-class LioVideoView extends StatelessWidget {
+/// Renders a user's video. Use [AppVideoView.local] for the local preview.
+class AppVideoView extends StatelessWidget {
   final lk.VideoTrack? track;
   final BoxFit fit;
   final bool mirror;
 
-  const LioVideoView({super.key, required this.track, this.fit = BoxFit.cover, this.mirror = false});
+  const AppVideoView({super.key, required this.track, this.fit = BoxFit.cover, this.mirror = false});
 
   /// Local camera preview.
-  factory LioVideoView.local(LioEngine engine, {Key? key, BoxFit fit = BoxFit.cover}) =>
-      LioVideoView(key: key, track: engine.localVideoTrack, fit: fit, mirror: true);
+  factory AppVideoView.local(AppEngine engine, {Key? key, BoxFit fit = BoxFit.cover}) =>
+      AppVideoView(key: key, track: engine.localVideoTrack, fit: fit, mirror: true);
 
   /// A remote user's video.
-  factory LioVideoView.remote(LioRemoteUser user, {Key? key, BoxFit fit = BoxFit.cover}) =>
-      LioVideoView(key: key, track: user.videoTrack, fit: fit);
+  factory AppVideoView.remote(AppRemoteUser user, {Key? key, BoxFit fit = BoxFit.cover}) =>
+      AppVideoView(key: key, track: user.videoTrack, fit: fit);
 
   @override
   Widget build(BuildContext context) {

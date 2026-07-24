@@ -3,12 +3,12 @@ import 'dart:typed_data';
 
 import 'package:livekit_client/livekit_client.dart' as lk;
 
-import 'lio_types.dart';
+import 'applooma_types.dart';
 
 /// A remote user in the channel.
-class LioRemoteUser {
+class AppRemoteUser {
   final lk.RemoteParticipant _p;
-  LioRemoteUser._(this._p);
+  AppRemoteUser._(this._p);
 
   String get uid => _p.identity;
   String? get displayName => _p.name;
@@ -17,7 +17,7 @@ class LioRemoteUser {
   bool get audioEnabled => _p.isMicrophoneEnabled();
   bool get videoEnabled => _p.isCameraEnabled();
 
-  /// Video track for rendering (see LioVideoView).
+  /// Video track for rendering (see AppVideoView).
   lk.VideoTrack? get videoTrack {
     for (final pub in _p.videoTrackPublications) {
       final t = pub.track;
@@ -30,28 +30,28 @@ class LioRemoteUser {
   lk.RemoteParticipant get raw => _p;
 }
 
-/// Main entry point of the Lio Live SDK.
-class LioEngine {
+/// Main entry point of the AppLooma RTC SDK.
+class AppEngine {
   final String appId;
   final lk.Room _room;
   lk.EventsListener<lk.RoomEvent>? _listener;
-  final _users = <String, LioRemoteUser>{};
+  final _users = <String, AppRemoteUser>{};
   bool _joined = false;
 
   // Event streams
-  final _userJoined = StreamController<LioRemoteUser>.broadcast();
-  final _userLeft = StreamController<LioRemoteUser>.broadcast();
-  final _connectionState = StreamController<LioConnectionState>.broadcast();
-  final _dataReceived = StreamController<(Uint8Array, LioRemoteUser?)>.broadcast();
+  final _userJoined = StreamController<AppRemoteUser>.broadcast();
+  final _userLeft = StreamController<AppRemoteUser>.broadcast();
+  final _connectionState = StreamController<AppConnectionState>.broadcast();
+  final _dataReceived = StreamController<(Uint8Array, AppRemoteUser?)>.broadcast();
   final _activeSpeakers = StreamController<List<String>>.broadcast();
 
-  Stream<LioRemoteUser> get onUserJoined => _userJoined.stream;
-  Stream<LioRemoteUser> get onUserLeft => _userLeft.stream;
-  Stream<LioConnectionState> get onConnectionStateChanged => _connectionState.stream;
-  Stream<(Uint8Array, LioRemoteUser?)> get onDataReceived => _dataReceived.stream;
+  Stream<AppRemoteUser> get onUserJoined => _userJoined.stream;
+  Stream<AppRemoteUser> get onUserLeft => _userLeft.stream;
+  Stream<AppConnectionState> get onConnectionStateChanged => _connectionState.stream;
+  Stream<(Uint8Array, AppRemoteUser?)> get onDataReceived => _dataReceived.stream;
   Stream<List<String>> get onActiveSpeakersChanged => _activeSpeakers.stream;
 
-  LioEngine._(this.appId)
+  AppEngine._(this.appId)
       : _room = lk.Room(
           roomOptions: const lk.RoomOptions(
             adaptiveStream: true,
@@ -59,12 +59,12 @@ class LioEngine {
           ),
         );
 
-  /// Create an engine instance with your Lio Live App ID.
-  static LioEngine create({required String appId}) {
+  /// Create an engine instance with your AppLooma RTC App ID.
+  static AppEngine create({required String appId}) {
     if (appId.isEmpty) {
-      throw ArgumentError('LioEngine.create: appId is required');
+      throw ArgumentError('AppEngine.create: appId is required');
     }
-    return LioEngine._(appId);
+    return AppEngine._(appId);
   }
 
   /// Join a channel with a token from your server
@@ -72,7 +72,7 @@ class LioEngine {
   Future<void> joinChannel({
     required String token,
     required String wsUrl,
-    LioJoinOptions options = const LioJoinOptions(),
+    AppJoinOptions options = const AppJoinOptions(),
   }) async {
     if (_joined) {
       throw StateError('Already in a channel — call leaveChannel() first');
@@ -81,7 +81,7 @@ class LioEngine {
     await _room.connect(wsUrl, token);
     _joined = true;
 
-    if (options.role != LioRole.audience) {
+    if (options.role != AppRole.audience) {
       if (options.microphone) {
         await _room.localParticipant?.setMicrophoneEnabled(true);
       }
@@ -107,7 +107,7 @@ class LioEngine {
   Future<void> enableScreenShare([bool on = true]) async =>
       _room.localParticipant?.setScreenShareEnabled(on);
 
-  /// Local camera preview track (see LioVideoView.local).
+  /// Local camera preview track (see AppVideoView.local).
   lk.VideoTrack? get localVideoTrack {
     final lp = _room.localParticipant;
     if (lp == null) return null;
@@ -129,10 +129,10 @@ class LioEngine {
   // ---- State ----
   String? get localUid => _room.localParticipant?.identity;
   String? get channelName => _room.name;
-  List<LioRemoteUser> get remoteUsers => List.unmodifiable(_users.values);
+  List<AppRemoteUser> get remoteUsers => List.unmodifiable(_users.values);
 
-  LioRemoteUser _userFor(lk.RemoteParticipant p) =>
-      _users.putIfAbsent(p.identity, () => LioRemoteUser._(p));
+  AppRemoteUser _userFor(lk.RemoteParticipant p) =>
+      _users.putIfAbsent(p.identity, () => AppRemoteUser._(p));
 
   void _wireEvents() {
     _listener?.dispose();
@@ -148,14 +148,14 @@ class LioEngine {
         if (u != null) _userLeft.add(u);
       })
       ..on<lk.RoomConnectedEvent>((_) {
-        _connectionState.add(LioConnectionState.connected);
+        _connectionState.add(AppConnectionState.connected);
       })
       ..on<lk.RoomReconnectingEvent>((_) {
-        _connectionState.add(LioConnectionState.reconnecting);
+        _connectionState.add(AppConnectionState.reconnecting);
       })
       ..on<lk.RoomDisconnectedEvent>((_) {
         _joined = false;
-        _connectionState.add(LioConnectionState.disconnected);
+        _connectionState.add(AppConnectionState.disconnected);
       })
       ..on<lk.DataReceivedEvent>((e) {
         final from = e.participant is lk.RemoteParticipant

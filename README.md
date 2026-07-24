@@ -1,12 +1,12 @@
-# lio_rtc
+# applooma_rtc
 
-Lio Live Flutter SDK — real-time voice, video, live streaming and audio rooms by AppLooma LLC.
+AppLooma RTC Flutter SDK — real-time voice, video, live streaming and audio rooms by AppLooma LLC.
 
 ## Install
 
 ```yaml
 dependencies:
-  lio_rtc: ^0.1.0
+  applooma_rtc: ^0.1.0
 ```
 
 Add camera/microphone permissions (AndroidManifest.xml + Info.plist).
@@ -14,9 +14,9 @@ Add camera/microphone permissions (AndroidManifest.xml + Info.plist).
 ## Quickstart
 
 ```dart
-import 'package:lio_rtc/lio_rtc.dart';
+import 'package:applooma_rtc/applooma_rtc.dart';
 
-final engine = LioEngine.create(appId: 'YOUR_APP_ID');
+final engine = AppEngine.create(appId: 'YOUR_APP_ID');
 
 engine.onUserJoined.listen((user) => print('${user.uid} joined'));
 
@@ -25,7 +25,7 @@ engine.onUserJoined.listen((user) => print('${user.uid} joined'));
 await engine.joinChannel(
   token: token,
   wsUrl: wsUrl,
-  options: const LioJoinOptions(role: LioRole.host, camera: true),
+  options: const AppJoinOptions(role: AppRole.host, camera: true),
 );
 ```
 
@@ -33,11 +33,11 @@ Render video:
 
 ```dart
 // Local preview
-LioVideoView.local(engine)
+AppVideoView.local(engine)
 
 // Remote users
 ListView(
-  children: engine.remoteUsers.map((u) => LioVideoView.remote(u)).toList(),
+  children: engine.remoteUsers.map((u) => AppVideoView.remote(u)).toList(),
 )
 ```
 
