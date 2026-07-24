@@ -21,7 +21,7 @@ final engine = LioEngine.create(appId: 'YOUR_APP_ID');
 engine.onUserJoined.listen((user) => print('${user.uid} joined'));
 
 // Get { token, wsUrl } from YOUR server, which calls
-// POST https://api.liolive.com/v1/token with your API key/secret.
+// POST https://api.applooma.dev/v1/token with your API key/secret.
 await engine.joinChannel(
   token: token,
   wsUrl: wsUrl,
@@ -55,4 +55,4 @@ await engine.leaveChannel();
 
 `host` (admin + publish) · `cohost` (publish) · `audience` (view only — live streaming viewers)
 
-Docs: https://docs.liolive.com
+Docs: https://applooma.dev/dashboard/docs

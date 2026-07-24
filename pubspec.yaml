@@ -1,7 +1,7 @@
 name: lio_rtc
 description: "Lio Live Flutter SDK — real-time voice, video, live streaming and audio rooms by AppLooma LLC."
 version: 0.1.0
-homepage: https://docs.liolive.com
+homepage: https://applooma.dev/dashboard/docs
 repository: https://github.com/applooma/lio-rtc-flutter
 
 environment:

@@ -68,7 +68,7 @@ class LioEngine {
   }
 
   /// Join a channel with a token from your server
-  /// (POST https://api.liolive.com/v1/token → { token, wsUrl }).
+  /// (POST https://api.applooma.dev/v1/token → { token, wsUrl }).
   Future<void> joinChannel({
     required String token,
     required String wsUrl,
