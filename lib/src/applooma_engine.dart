@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:livekit_client/livekit_client.dart' as lk;
+import 'package:applooma_rtc_core/applooma_rtc_core.dart' as lk;
 import 'package:meta/meta.dart';
 
 import 'applooma_types.dart';

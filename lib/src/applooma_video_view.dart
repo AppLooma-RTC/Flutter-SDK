@@ -1,5 +1,5 @@
 import 'package:flutter/widgets.dart';
-import 'package:livekit_client/livekit_client.dart' as lk;
+import 'package:applooma_rtc_core/applooma_rtc_core.dart' as lk;
 
 import 'applooma_engine.dart';
 
