@@ -3,31 +3,60 @@ import 'package:livekit_client/livekit_client.dart' as lk;
 
 import 'applooma_engine.dart';
 
-/// Renders a user's video. Use [AppVideoView.local] for the local preview.
+/// Renders a participant's camera.
+///
+/// Use [AppVideoView.local] for your own preview and [AppVideoView.remote] for
+/// someone else in the channel:
+///
+/// ```dart
+/// AppVideoView.local(engine)
+/// for (final user in engine.remoteUsers) AppVideoView.remote(user)
+/// ```
+///
+/// Nothing is drawn until that participant publishes a camera, so rebuild your
+/// UI on [AppEngine.onTrackSubscribed] as well as [AppEngine.onUserJoined] —
+/// a participant is announced before their track arrives.
 class AppVideoView extends StatelessWidget {
-  final lk.VideoTrack? track;
+  // Kept private: the underlying track type is an implementation detail and
+  // should never appear in application code.
+  final lk.VideoTrack? _track;
+
+  /// How the video fills its box. Defaults to [BoxFit.cover].
   final BoxFit fit;
+
+  /// Mirrors the image horizontally. On by default for the local preview,
+  /// because people expect their own camera to behave like a mirror.
   final bool mirror;
 
-  const AppVideoView({super.key, required this.track, this.fit = BoxFit.cover, this.mirror = false});
+  const AppVideoView._(this._track, {super.key, this.fit = BoxFit.cover, this.mirror = false});
 
-  /// Local camera preview.
-  factory AppVideoView.local(AppEngine engine, {Key? key, BoxFit fit = BoxFit.cover}) =>
-      AppVideoView(key: key, track: engine.localVideoTrack, fit: fit, mirror: true);
+  /// Your own camera preview.
+  factory AppVideoView.local(
+    AppEngine engine, {
+    Key? key,
+    BoxFit fit = BoxFit.cover,
+    bool mirror = true,
+  }) =>
+      AppVideoView._(engine.localVideoTrack, key: key, fit: fit, mirror: mirror);
 
-  /// A remote user's video.
-  factory AppVideoView.remote(AppRemoteUser user, {Key? key, BoxFit fit = BoxFit.cover}) =>
-      AppVideoView(key: key, track: user.videoTrack, fit: fit);
+  /// A remote participant's camera.
+  factory AppVideoView.remote(
+    AppRemoteUser user, {
+    Key? key,
+    BoxFit fit = BoxFit.cover,
+    bool mirror = false,
+  }) =>
+      AppVideoView._(user.videoTrack, key: key, fit: fit, mirror: mirror);
 
   @override
   Widget build(BuildContext context) {
-    final t = track;
-    if (t == null) return const SizedBox.shrink();
+    final track = _track;
+    // No camera published yet. Draw your own placeholder around this widget.
+    if (track == null) return const SizedBox.shrink();
+
     return lk.VideoTrackRenderer(
-      t,
-      fit: fit == BoxFit.contain
-          ? lk.VideoViewFit.contain
-          : lk.VideoViewFit.cover,
+      track,
+      fit: fit == BoxFit.contain ? lk.VideoViewFit.contain : lk.VideoViewFit.cover,
       mirrorMode: mirror ? lk.VideoViewMirrorMode.mirror : lk.VideoViewMirrorMode.off,
     );
   }

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:livekit_client/livekit_client.dart' as lk;
+import 'package:meta/meta.dart';
 
 import 'applooma_types.dart';
 
@@ -19,6 +20,15 @@ class AppRemoteUser {
   bool get videoEnabled => _p.isCameraEnabled();
 
   /// Video track for rendering (see AppVideoView).
+  /// Whether this participant is currently publishing a camera.
+  ///
+  /// A participant is announced before their track arrives, so this is false
+  /// for a moment after they join.
+  bool get hasVideo => videoTrack != null;
+
+  /// The underlying camera track. Used by [AppVideoView]; application code
+  /// should render with `AppVideoView.remote(user)` instead.
+  @internal
   lk.VideoTrack? get videoTrack {
     for (final pub in _p.videoTrackPublications) {
       final t = pub.track;
@@ -125,6 +135,9 @@ class AppEngine {
       _room.localParticipant?.setScreenShareEnabled(on);
 
   /// Local camera preview track (see AppVideoView.local).
+  /// The local camera track. Used by [AppVideoView]; application code should
+  /// render with `AppVideoView.local(engine)` instead.
+  @internal
   lk.VideoTrack? get localVideoTrack {
     final lp = _room.localParticipant;
     if (lp == null) return null;
