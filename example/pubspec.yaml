@@ -1,0 +1,21 @@
+name: applooma_rtc_example
+description: A minimal two-person video call built with applooma_rtc.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  applooma_rtc:
+    path: ../
+  http: ^1.2.0
+
+dev_dependencies:
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

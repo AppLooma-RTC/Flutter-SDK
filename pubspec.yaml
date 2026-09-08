@@ -1,0 +1,37 @@
+name: applooma_rtc
+description: >-
+  Real-time voice, video, live streaming and audio rooms for Flutter. Join
+  channels with a token from your server, render participants and send data.
+version: 0.1.0
+
+homepage: https://applooma.dev
+repository: https://github.com/apploomadev/Flutter-SDK
+issue_tracker: https://github.com/apploomadev/Flutter-SDK/issues
+documentation: https://docs.applooma.dev/sdk/flutter
+
+topics:
+  - webrtc
+  - video
+  - voice
+  - live-streaming
+  - realtime
+
+platforms:
+  android:
+  ios:
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  livekit_client: ^2.3.0
+  # @internal annotations keep engine types out of the documented API surface.
+  meta: ^1.15.0
+
+dev_dependencies:
+  flutter_lints: ^5.0.0
+
+flutter:

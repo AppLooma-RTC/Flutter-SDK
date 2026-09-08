@@ -1,0 +1,4 @@
+# Keeps the published archive to what a consumer actually needs.
+.dart_tool/
+.flutter-plugins-dependencies
+pubspec.lock
