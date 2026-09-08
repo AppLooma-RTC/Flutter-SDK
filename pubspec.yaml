@@ -2,7 +2,8 @@ name: applooma_rtc
 description: "AppLooma RTC Flutter SDK — real-time voice, video, live streaming and audio rooms by AppLooma LLC."
 version: 0.1.0
 homepage: https://applooma.dev/dashboard/docs
-repository: https://github.com/applooma/applooma-rtc-flutter
+repository: https://github.com/Codex-For-Jafor/cpas
+issue_tracker: https://applooma.dev/dashboard/docs
 
 environment:
   sdk: ">=3.0.0 <4.0.0"

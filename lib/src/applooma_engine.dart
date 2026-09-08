@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:livekit_client/livekit_client.dart' as lk;
@@ -44,12 +45,23 @@ class AppEngine {
   final _connectionState = StreamController<AppConnectionState>.broadcast();
   final _dataReceived = StreamController<(Uint8Array, AppRemoteUser?)>.broadcast();
   final _activeSpeakers = StreamController<List<String>>.broadcast();
+  final _trackSubscribed = StreamController<AppRemoteUser>.broadcast();
+  final _trackUnsubscribed = StreamController<AppRemoteUser>.broadcast();
+  final _giftReceived = StreamController<AppGiftEvent>.broadcast();
 
   Stream<AppRemoteUser> get onUserJoined => _userJoined.stream;
   Stream<AppRemoteUser> get onUserLeft => _userLeft.stream;
   Stream<AppConnectionState> get onConnectionStateChanged => _connectionState.stream;
   Stream<(Uint8Array, AppRemoteUser?)> get onDataReceived => _dataReceived.stream;
   Stream<List<String>> get onActiveSpeakersChanged => _activeSpeakers.stream;
+
+  /// A remote user's camera or microphone became available to render. Rebuild
+  /// your video tiles on this — a user is announced before their track arrives.
+  Stream<AppRemoteUser> get onTrackSubscribed => _trackSubscribed.stream;
+  Stream<AppRemoteUser> get onTrackUnsubscribed => _trackUnsubscribed.stream;
+
+  /// A virtual gift was broadcast to the channel.
+  Stream<AppGiftEvent> get onGiftReceived => _giftReceived.stream;
 
   AppEngine._(this.appId)
       : _room = lk.Room(
@@ -80,6 +92,11 @@ class AppEngine {
     _wireEvents();
     await _room.connect(wsUrl, token);
     _joined = true;
+
+    // Participants already in the room when we join never produce a
+    // "participant connected" event; without this an audience member joining a
+    // live stream sees nobody and never receives the host's video.
+    _seedExistingParticipants();
 
     if (options.role != AppRole.audience) {
       if (options.microphone) {
@@ -134,6 +151,17 @@ class AppEngine {
   AppRemoteUser _userFor(lk.RemoteParticipant p) =>
       _users.putIfAbsent(p.identity, () => AppRemoteUser._(p));
 
+  /// Announces everyone already present, and their already-published tracks.
+  void _seedExistingParticipants() {
+    for (final p in _room.remoteParticipants.values) {
+      final user = _userFor(p);
+      _userJoined.add(user);
+      for (final pub in p.trackPublications.values) {
+        if (pub.track != null) _trackSubscribed.add(user);
+      }
+    }
+  }
+
   void _wireEvents() {
     _listener?.dispose();
     final listener = _room.createListener();
@@ -153,8 +181,20 @@ class AppEngine {
       ..on<lk.RoomReconnectingEvent>((_) {
         _connectionState.add(AppConnectionState.reconnecting);
       })
+      ..on<lk.TrackSubscribedEvent>((e) {
+        _trackSubscribed.add(_userFor(e.participant));
+      })
+      ..on<lk.TrackUnsubscribedEvent>((e) {
+        _trackUnsubscribed.add(_userFor(e.participant));
+      })
       ..on<lk.RoomDisconnectedEvent>((_) {
         _joined = false;
+        // Report everyone as gone; a stale roster after a disconnect made
+        // remoteUsers wrong until the next join.
+        for (final u in _users.values) {
+          _userLeft.add(u);
+        }
+        _users.clear();
         _connectionState.add(AppConnectionState.disconnected);
       })
       ..on<lk.DataReceivedEvent>((e) {
@@ -162,6 +202,16 @@ class AppEngine {
             ? _userFor(e.participant as lk.RemoteParticipant)
             : null;
         _dataReceived.add((Uint8Array.fromList(e.data), from));
+        // Platform events (gifts) arrive on the same channel as JSON.
+        try {
+          final msg = jsonDecode(utf8.decode(e.data));
+          if (msg is Map && msg['type'] == 'applooma.gift') {
+            final gift = AppGiftEvent.fromJson(Map<String, dynamic>.from(msg));
+            if (gift != null) _giftReceived.add(gift);
+          }
+        } catch (_) {
+          // Not JSON — ordinary user data.
+        }
       })
       ..on<lk.ActiveSpeakersChangedEvent>((e) {
         _activeSpeakers.add(e.speakers.map((s) => s.identity).toList());
