@@ -227,6 +227,9 @@ class AppEngine {
     await _connectionState.close();
     await _dataReceived.close();
     await _activeSpeakers.close();
+    await _trackSubscribed.close();
+    await _trackUnsubscribed.close();
+    await _giftReceived.close();
     await _room.dispose();
   }
 
