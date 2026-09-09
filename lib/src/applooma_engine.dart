@@ -7,6 +7,45 @@ import 'package:meta/meta.dart';
 
 import 'applooma_types.dart';
 
+/// Our own frames travel on the same channel as customer data, tagged so the
+/// two never mix.
+const _messageType = 'applooma.message';
+const _giftType = 'applooma.gift';
+
+int _idCounter = 0;
+String _newId() =>
+    'm_${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}_${(_idCounter++).toRadixString(36)}';
+
+/// A message sent to everyone in the channel.
+///
+/// Messages ride the same channel as the media, so they arrive with the same
+/// latency and need no second connection. Nothing is stored: a message reaches
+/// whoever is in the channel at the time.
+class AppMessage {
+  /// Unique to this message. Useful as a list key and for de-duplicating.
+  final String id;
+
+  /// What was sent, when [AppEngine.sendMessage] was given a string.
+  final String? text;
+
+  /// What was sent, when it was given a map.
+  final Map<String, dynamic>? data;
+
+  /// Who sent it. Null if it came from your own server.
+  final AppRemoteUser? from;
+
+  /// The sender's clock, not ours — do not order messages by it alone.
+  final DateTime sentAt;
+
+  const AppMessage({
+    required this.id,
+    required this.sentAt,
+    this.text,
+    this.data,
+    this.from,
+  });
+}
+
 /// A remote user in the channel.
 class AppRemoteUser {
   final lk.RemoteParticipant _p;
@@ -14,7 +53,54 @@ class AppRemoteUser {
 
   String get uid => _p.identity;
   String? get displayName => _p.name;
+
+  /// What this user is allowed to do, decided by the token their server minted.
+  /// An [AppRole.audience] member can watch and send messages but cannot publish.
+  AppRole get role {
+    switch (_parsed()['role']) {
+      case 'host':
+        return AppRole.host;
+      case 'cohost':
+        return AppRole.cohost;
+      default:
+        return AppRole.audience;
+    }
+  }
+
+  /// Whether this user can publish. Convenient for laying out a stage.
+  bool get isPublisher => role != AppRole.audience;
+
+  /// The metadata your own server put in the token, with our fields stripped out.
+  Map<String, dynamic> get attributes {
+    final map = Map<String, dynamic>.from(_parsed());
+    map.remove('appId');
+    map.remove('role');
+    return map;
+  }
+
+  /// The raw metadata string. Prefer [attributes].
   String? get metadata => _p.metadata;
+
+  String? _cachedRaw;
+  Map<String, dynamic>? _cachedValue;
+
+  /// Parsing runs once per metadata string, not once per read.
+  Map<String, dynamic> _parsed() {
+    final raw = _p.metadata;
+    if (_cachedValue != null && _cachedRaw == raw) return _cachedValue!;
+    Map<String, dynamic> value = const {};
+    if (raw != null && raw.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map<String, dynamic>) value = decoded;
+      } catch (_) {
+        // Not ours — a customer may put anything here.
+      }
+    }
+    _cachedRaw = raw;
+    _cachedValue = value;
+    return value;
+  }
   bool get isSpeaking => _p.isSpeaking;
   bool get audioEnabled => _p.isMicrophoneEnabled();
   bool get videoEnabled => _p.isCameraEnabled();
@@ -58,10 +144,20 @@ class AppEngine {
   final _trackSubscribed = StreamController<AppRemoteUser>.broadcast();
   final _trackUnsubscribed = StreamController<AppRemoteUser>.broadcast();
   final _giftReceived = StreamController<AppGiftEvent>.broadcast();
+  final _message = StreamController<AppMessage>.broadcast();
+  final _audienceChanged = StreamController<List<AppRemoteUser>>.broadcast();
 
   Stream<AppRemoteUser> get onUserJoined => _userJoined.stream;
   Stream<AppRemoteUser> get onUserLeft => _userLeft.stream;
   Stream<AppConnectionState> get onConnectionStateChanged => _connectionState.stream;
+  /// Someone sent a message with [sendMessage].
+  Stream<AppMessage> get onMessage => _message.stream;
+
+  /// The audience changed — someone started or stopped watching.
+  /// Carries the whole list, so a viewer count can be rendered from it directly.
+  Stream<List<AppRemoteUser>> get onAudienceChanged => _audienceChanged.stream;
+
+  /// Raw bytes from [sendData]. Platform frames are not reported here.
   Stream<(Uint8Array, AppRemoteUser?)> get onDataReceived => _dataReceived.stream;
   Stream<List<String>> get onActiveSpeakersChanged => _activeSpeakers.stream;
 
@@ -148,7 +244,39 @@ class AppEngine {
     return null;
   }
 
-  /// Broadcast data to the channel (chat, signals, gifts).
+  /// Send a message to everyone in the channel.
+  ///
+  /// An audience member can call this even though they cannot publish video —
+  /// which is what makes live comments on a broadcast work.
+  ///
+  /// Pass [text] for a comment or [data] for anything structured. Nothing is
+  /// stored, so a message reaches whoever is present when it is sent.
+  Future<AppMessage> sendMessage({
+    String? text,
+    Map<String, dynamic>? data,
+    bool reliable = true,
+  }) async {
+    assert(text != null || data != null, 'sendMessage needs text or data');
+    final message = AppMessage(
+      id: _newId(),
+      text: text,
+      data: data,
+      sentAt: DateTime.now(),
+    );
+    await sendData(
+      utf8.encode(jsonEncode({
+        'type': _messageType,
+        'id': message.id,
+        if (text != null) 'text': text,
+        if (data != null) 'data': data,
+        'sentAt': message.sentAt.toUtc().toIso8601String(),
+      })),
+      reliable: reliable,
+    );
+    return message;
+  }
+
+  /// Broadcast raw bytes. Prefer [sendMessage] unless you need your own format.
   Future<void> sendData(List<int> data, {bool reliable = true}) async {
     await _room.localParticipant?.publishData(
       data,
@@ -160,6 +288,17 @@ class AppEngine {
   String? get localUid => _room.localParticipant?.identity;
   String? get channelName => _room.name;
   List<AppRemoteUser> get remoteUsers => List.unmodifiable(_users.values);
+
+  /// Everyone watching without publishing. The live audience of a broadcast.
+  List<AppRemoteUser> get audience =>
+      List.unmodifiable(_users.values.where((u) => !u.isPublisher));
+
+  /// How many people are watching.
+  int get audienceCount => _users.values.where((u) => !u.isPublisher).length;
+
+  /// Everyone on stage: the host and any co-hosts, excluding you.
+  List<AppRemoteUser> get hosts =>
+      List.unmodifiable(_users.values.where((u) => u.isPublisher));
 
   AppRemoteUser _userFor(lk.RemoteParticipant p) =>
       _users.putIfAbsent(p.identity, () => AppRemoteUser._(p));
@@ -183,10 +322,12 @@ class AppEngine {
     listener
       ..on<lk.ParticipantConnectedEvent>((e) {
         _userJoined.add(_userFor(e.participant));
+        _audienceChanged.add(audience);
       })
       ..on<lk.ParticipantDisconnectedEvent>((e) {
         final u = _users.remove(e.participant.identity);
         if (u != null) _userLeft.add(u);
+        _audienceChanged.add(audience);
       })
       ..on<lk.RoomConnectedEvent>((_) {
         _connectionState.add(AppConnectionState.connected);
@@ -214,17 +355,36 @@ class AppEngine {
         final from = e.participant is lk.RemoteParticipant
             ? _userFor(e.participant as lk.RemoteParticipant)
             : null;
-        _dataReceived.add((Uint8Array.fromList(e.data), from));
-        // Platform events (gifts) arrive on the same channel as JSON.
+
+        // Each frame is either ours or the customer's, never both. Reporting
+        // our own envelopes as raw data as well would deliver every comment
+        // twice to anyone listening on both streams.
+        dynamic frame;
         try {
-          final msg = jsonDecode(utf8.decode(e.data));
-          if (msg is Map && msg['type'] == 'applooma.gift') {
-            final gift = AppGiftEvent.fromJson(Map<String, dynamic>.from(msg));
-            if (gift != null) _giftReceived.add(gift);
-          }
+          frame = jsonDecode(utf8.decode(e.data));
         } catch (_) {
-          // Not JSON — ordinary user data.
+          frame = null;
         }
+
+        if (frame is Map && frame['type'] == _messageType) {
+          _message.add(AppMessage(
+            id: frame['id'] as String? ?? _newId(),
+            text: frame['text'] as String?,
+            data: frame['data'] is Map
+                ? Map<String, dynamic>.from(frame['data'] as Map)
+                : null,
+            from: from,
+            sentAt: DateTime.tryParse(frame['sentAt'] as String? ?? '') ??
+                DateTime.now(),
+          ));
+          return;
+        }
+        if (frame is Map && frame['type'] == _giftType) {
+          final gift = AppGiftEvent.fromJson(Map<String, dynamic>.from(frame));
+          if (gift != null) _giftReceived.add(gift);
+          return;
+        }
+        _dataReceived.add((Uint8Array.fromList(e.data), from));
       })
       ..on<lk.ActiveSpeakersChangedEvent>((e) {
         _activeSpeakers.add(e.speakers.map((s) => s.identity).toList());
@@ -243,6 +403,8 @@ class AppEngine {
     await _trackSubscribed.close();
     await _trackUnsubscribed.close();
     await _giftReceived.close();
+    await _message.close();
+    await _audienceChanged.close();
     await _room.dispose();
   }
 
