@@ -171,9 +171,27 @@ class AppEngine {
 
   AppEngine._(this.appId)
       : _room = lk.Room(
+          // 1080p with simulcast so each viewer gets the layer their screen
+          // and link can take; 96 kbps voice with redundancy and no DTX.
           roomOptions: const lk.RoomOptions(
             adaptiveStream: true,
             dynacast: true,
+            defaultCameraCaptureOptions: lk.CameraCaptureOptions(
+              params: lk.VideoParametersPresets.h1080_169,
+            ),
+            defaultVideoPublishOptions: lk.VideoPublishOptions(
+              videoEncoding: lk.VideoParametersPresets.h1080_169.encoding,
+              simulcast: true,
+            ),
+            defaultAudioCaptureOptions: lk.AudioCaptureOptions(
+              noiseSuppression: true,
+              echoCancellation: true,
+              autoGainControl: true,
+            ),
+            defaultAudioPublishOptions: lk.AudioPublishOptions(
+              dtx: false,
+              audioBitrate: 96000,
+            ),
           ),
         );
 
