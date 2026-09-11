@@ -180,7 +180,7 @@ class AppEngine {
               params: lk.VideoParametersPresets.h1080_169,
             ),
             defaultVideoPublishOptions: lk.VideoPublishOptions(
-              videoEncoding: lk.VideoParametersPresets.h1080_169.encoding,
+              videoEncoding: lk.VideoEncoding(maxBitrate: 3500000, maxFramerate: 30),
               simulcast: true,
             ),
             defaultAudioCaptureOptions: lk.AudioCaptureOptions(
@@ -188,10 +188,7 @@ class AppEngine {
               echoCancellation: true,
               autoGainControl: true,
             ),
-            defaultAudioPublishOptions: lk.AudioPublishOptions(
-              dtx: false,
-              audioBitrate: 96000,
-            ),
+            defaultAudioPublishOptions: lk.AudioPublishOptions(dtx: false),
           ),
         );
 
