@@ -5,8 +5,8 @@ description: >-
 version: 0.1.0
 
 homepage: https://applooma.dev
-repository: https://github.com/apploomadev/Flutter-SDK
-issue_tracker: https://github.com/apploomadev/Flutter-SDK/issues
+repository: https://github.com/AppLooma-RTC/Flutter-SDK
+issue_tracker: https://github.com/AppLooma-RTC/Flutter-SDK/issues
 documentation: https://docs.applooma.dev/sdk/flutter
 
 topics:

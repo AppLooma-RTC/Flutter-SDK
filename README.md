@@ -99,7 +99,7 @@ which is what keeps a large broadcast cheap and stable.
 ## Support
 
 - Documentation — https://docs.applooma.dev
-- Issues — https://github.com/apploomadev/Flutter-SDK/issues
+- Issues — https://github.com/AppLooma-RTC/Flutter-SDK/issues
 - Email — support@applooma.dev
 
 ## Licence
