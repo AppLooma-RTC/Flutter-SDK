@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.0
+
+- Signaling: `sendMessage`, `onMessage`, `audience`, `audienceCount`, `hosts` and
+  `onAudienceChanged` — live comments, viewer counts and audience lists without a
+  server round trip. Platform frames no longer surface on `onDataReceived`.
+- HD by default: 1080p publish with simulcast, 96 kbps voice with redundancy and
+  no DTX. Adaptive streaming hands each viewer the layer their screen and link
+  can take.
+- Repository moved to github.com/AppLooma-RTC.
+
 ## 0.1.0
 
 First release.
