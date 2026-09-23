@@ -1,9 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:applooma_rtc_core/applooma_rtc_core.dart' as lk;
-import 'package:meta/meta.dart';
+import 'package:flutter/foundation.dart';
 
 import 'applooma_types.dart';
 
@@ -101,11 +100,11 @@ class AppRemoteUser {
     _cachedValue = value;
     return value;
   }
+
   bool get isSpeaking => _p.isSpeaking;
   bool get audioEnabled => _p.isMicrophoneEnabled();
   bool get videoEnabled => _p.isCameraEnabled();
 
-  /// Video track for rendering (see AppVideoView).
   /// Whether this participant is currently publishing a camera.
   ///
   /// A participant is announced before their track arrives, so this is false
@@ -127,12 +126,28 @@ class AppRemoteUser {
   lk.RemoteParticipant get raw => _p;
 }
 
+/// Latest receiver stats for one remote user, folded into [AppRemoteStats].
+class _RemoteHealth {
+  int fps = 0, width = 0, height = 0, vLost = 0, aLost = 0, jitterMs = 0, freezes = 0;
+  bool hadPicture = false;
+  bool firstFrameReported = false;
+  final listeners = <lk.EventsListener<lk.TrackEvent>>[];
+}
+
 /// Main entry point of the AppLooma RTC SDK.
+///
+/// One engine is one connection to one channel. To be in two channels at once
+/// (a PK battle, watching a second stream) create a second engine; instances
+/// are independent and any number may coexist.
 class AppEngine {
   final String appId;
+  final AppEngineOptions options;
   final lk.Room _room;
   lk.EventsListener<lk.RoomEvent>? _listener;
   final _users = <String, AppRemoteUser>{};
+  final _health = <String, _RemoteHealth>{};
+  Timer? _statsTimer;
+  DateTime? _joinStartedAt;
   bool _joined = false;
 
   // Event streams
@@ -146,10 +161,15 @@ class AppEngine {
   final _giftReceived = StreamController<AppGiftEvent>.broadcast();
   final _message = StreamController<AppMessage>.broadcast();
   final _audienceChanged = StreamController<List<AppRemoteUser>>.broadcast();
+  final _localVideoChanged = StreamController<void>.broadcast();
+  final _remoteStats = StreamController<List<AppRemoteStats>>.broadcast();
+  final _firstRemoteVideoFrame = StreamController<(String, int)>.broadcast();
+  final _connectionStage = StreamController<(AppConnectionStage, String?, int)>.broadcast();
 
   Stream<AppRemoteUser> get onUserJoined => _userJoined.stream;
   Stream<AppRemoteUser> get onUserLeft => _userLeft.stream;
   Stream<AppConnectionState> get onConnectionStateChanged => _connectionState.stream;
+
   /// Someone sent a message with [sendMessage].
   Stream<AppMessage> get onMessage => _message.stream;
 
@@ -169,36 +189,151 @@ class AppEngine {
   /// A virtual gift was broadcast to the channel.
   Stream<AppGiftEvent> get onGiftReceived => _giftReceived.stream;
 
-  AppEngine._(this.appId)
-      : _room = lk.Room(
-          // 1080p with simulcast so each viewer gets the layer their screen
-          // and link can take; 96 kbps voice with redundancy and no DTX.
-          roomOptions: const lk.RoomOptions(
-            adaptiveStream: true,
-            dynacast: true,
-            defaultCameraCaptureOptions: lk.CameraCaptureOptions(
-              params: lk.VideoParametersPresets.h1080_169,
-            ),
-            defaultVideoPublishOptions: lk.VideoPublishOptions(
-              videoEncoding: lk.VideoEncoding(maxBitrate: 3500000, maxFramerate: 30),
-              simulcast: true,
-            ),
-            defaultAudioCaptureOptions: lk.AudioCaptureOptions(
-              noiseSuppression: true,
-              echoCancellation: true,
-              autoGainControl: true,
-            ),
-            defaultAudioPublishOptions: lk.AudioPublishOptions(dtx: false),
-          ),
-        );
+  /// Your own camera track was (re)created — camera off→on, a switch, a
+  /// settings change. `AppVideoView.local` rebuilds by itself; listen here for
+  /// anything else that holds your preview.
+  Stream<void> get onLocalVideoChanged => _localVideoChanged.stream;
+
+  /// Per-remote-user media health every two seconds while joined.
+  Stream<List<AppRemoteStats>> get onRemoteStats => _remoteStats.stream;
+
+  /// The first decoded frame of a remote user's camera reached your screen:
+  /// `(uid, elapsedMs since joinChannel)`. Resolved from receiver statistics,
+  /// so it is reported within about two seconds of the frame.
+  Stream<(String, int)> get onFirstRemoteVideoFrame => _firstRemoteVideoFrame.stream;
+
+  /// Milestones with elapsed ms since [joinChannel]: `(stage, uid, elapsedMs)`.
+  Stream<(AppConnectionStage, String?, int)> get onConnectionStage => _connectionStage.stream;
+
+  AppEngine._(this.appId, this.options) : _room = lk.Room(roomOptions: _roomOptions(options));
+
+  static lk.VideoParameters _preset(int height) {
+    switch (height) {
+      case 360:
+        return lk.VideoParametersPresets.h360_169;
+      case 540:
+        return lk.VideoParametersPresets.h540_169;
+      case 720:
+        return lk.VideoParametersPresets.h720_169;
+      default:
+        return lk.VideoParametersPresets.h1080_169;
+    }
+  }
+
+  /// The codec published for [config] once [AppVideoCodec.auto] is resolved.
+  static String resolveCodec(AppVideoCodec c) {
+    switch (c) {
+      case AppVideoCodec.vp8:
+        return 'vp8';
+      case AppVideoCodec.h264:
+        return 'h264';
+      case AppVideoCodec.auto:
+        // Every Android and iOS phone encodes H.264 in hardware; software VP8
+        // at 720p/30 + simulcast drops frames and starves audio on budget
+        // chipsets. A VP8 backup layer covers viewers that cannot decode it.
+        return 'h264';
+    }
+  }
+
+  static lk.RoomOptions _roomOptions(AppEngineOptions o) {
+    const heights = [360, 540, 720, 1080];
+    var height = heights.first;
+    for (final h in heights) {
+      if ((h - o.video.height).abs() < (height - o.video.height).abs()) height = h;
+    }
+    if (height != o.video.height) {
+      debugPrint('[AppLoomaRTC] AppVideoConfig.height=${o.video.height} is not a preset; using ${height}p');
+    }
+    if (o.video.maxBitrate > 0 && o.video.maxBitrate < 10000) {
+      debugPrint('[AppLoomaRTC] AppVideoConfig.maxBitrate=${o.video.maxBitrate} is in bits per second — did you mean ${o.video.maxBitrate}000 (kbps)?');
+    }
+    final preset = _preset(height);
+    final encoding = lk.VideoEncoding(
+      maxBitrate: o.video.maxBitrate > 0 ? o.video.maxBitrate : (preset.encoding?.maxBitrate ?? 1700000),
+      maxFramerate: o.video.fps,
+    );
+    final codec = resolveCodec(o.video.codec);
+    return lk.RoomOptions(
+      // Adaptive stream still down-shifts a remote layer for a small or hidden
+      // view (good on weak links). Dynacast is OFF: with it on, a publisher
+      // withholds a video layer until a subscriber's "viewing" signal arrives,
+      // which on flaky links left co-hosts staring at a black frame.
+      adaptiveStream: true,
+      dynacast: false,
+      defaultCameraCaptureOptions: lk.CameraCaptureOptions(params: preset),
+      defaultVideoPublishOptions: lk.VideoPublishOptions(
+        videoCodec: codec,
+        videoEncoding: encoding,
+        simulcast: o.video.simulcast,
+        // When H.264 is published, a VP8 layer rides along as backup so a
+        // viewer whose phone cannot decode the H.264 stream is served VP8 by
+        // the server instead of a black frame.
+        backupVideoCodec: codec == 'h264'
+            ? lk.BackupVideoCodec(enabled: true, codec: 'vp8', simulcast: o.video.simulcast)
+            : const lk.BackupVideoCodec(enabled: false),
+      ),
+      defaultAudioCaptureOptions: lk.AudioCaptureOptions(
+        noiseSuppression: o.audio.noiseSuppression,
+        echoCancellation: o.audio.echoCancellation,
+        autoGainControl: o.audio.autoGainControl,
+      ),
+      defaultAudioPublishOptions: const lk.AudioPublishOptions(dtx: false),
+    );
+  }
+
+  /// Platform audio session for a scenario. MEDIA keeps media attributes
+  /// (loudspeaker, media volume keys) but runs Android in the communication
+  /// audio mode, and iOS in playAndRecord + videoChat, so the phone's echo
+  /// canceller stays engaged — plain media mode leaves it off and a
+  /// loudspeaker session then feeds itself back after a minute or two.
+  static lk.AudioSessionOptions _sessionOptions(AppAudioScenario s) {
+    if (s == AppAudioScenario.call) return const lk.AudioSessionOptions.communication();
+    return const lk.AudioSessionOptions.mediaPlayback(
+      android: lk.AndroidAudioSessionConfiguration(
+        audioMode: lk.AndroidAudioMode.inCommunication,
+        manageAudioFocus: true,
+        focusMode: lk.AndroidAudioFocusMode.gain,
+        streamType: lk.AndroidAudioStreamType.music,
+        usageType: lk.AndroidAudioAttributesUsageType.media,
+        contentType: lk.AndroidAudioAttributesContentType.music,
+      ),
+      apple: lk.AppleAudioSessionConfiguration(
+        category: lk.AppleAudioCategory.playAndRecord,
+        categoryOptions: {
+          lk.AppleAudioCategoryOption.defaultToSpeaker,
+          lk.AppleAudioCategoryOption.allowBluetooth,
+          lk.AppleAudioCategoryOption.allowBluetoothA2DP,
+          lk.AppleAudioCategoryOption.mixWithOthers,
+        },
+        mode: lk.AppleAudioMode.videoChat,
+      ),
+    );
+  }
+
+  static Future<void>? _platformInit;
+  static bool get _isMobile =>
+      !kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS);
+
+  /// WebRTC reads Android playout attributes once, when it creates its audio
+  /// device module — so the first engine's scenario seeds them, before connect.
+  static Future<void> _ensurePlatformInit(AppAudioScenario s) {
+    return _platformInit ??= _isMobile
+        ? lk.LiveKitClient.initialize(initialAudioSessionOptions: _sessionOptions(s))
+        : Future.value();
+  }
 
   /// Create an engine instance with your AppLooma RTC App ID.
-  static AppEngine create({required String appId}) {
+  static AppEngine create({required String appId, AppEngineOptions options = const AppEngineOptions()}) {
     if (appId.isEmpty) {
       throw ArgumentError('AppEngine.create: appId is required');
     }
-    return AppEngine._(appId);
+    return AppEngine._(appId, options);
   }
+
+  /// The codec this phone publishes with, after [AppVideoCodec.auto] is resolved.
+  String get publishedCodec => resolveCodec(options.video.codec);
+
+  int _elapsed() => _joinStartedAt == null ? 0 : DateTime.now().difference(_joinStartedAt!).inMilliseconds;
 
   /// Join a channel with a token from your server
   /// (POST https://api.applooma.dev/v1/token → { token, wsUrl }).
@@ -210,14 +345,28 @@ class AppEngine {
     if (_joined) {
       throw StateError('Already in a channel — call leaveChannel() first');
     }
+    _joinStartedAt = DateTime.now();
+    await _ensurePlatformInit(this.options.audioScenario);
+    if (_isMobile) {
+      // Runtime session policy for this engine's scenario.
+      try {
+        await lk.AudioManager.instance.setAudioSessionOptions(_sessionOptions(this.options.audioScenario));
+      } catch (e) {
+        debugPrint('[AppLoomaRTC] audio session: $e');
+      }
+    }
     _wireEvents();
-    await _room.connect(wsUrl, token);
+    // Auto-subscribe so an audience member (and every co-host) receives all
+    // published tracks the moment they join.
+    await _room.connect(wsUrl, token, connectOptions: const lk.ConnectOptions(autoSubscribe: true));
     _joined = true;
+    _connectionStage.add((AppConnectionStage.connected, null, _elapsed()));
 
     // Participants already in the room when we join never produce a
     // "participant connected" event; without this an audience member joining a
     // live stream sees nobody and never receives the host's video.
     _seedExistingParticipants();
+    _startStats();
 
     if (options.role != AppRole.audience) {
       if (options.microphone) {
@@ -230,14 +379,17 @@ class AppEngine {
   }
 
   Future<void> leaveChannel() async {
+    _stopStats();
     await _room.disconnect();
     _joined = false;
     _users.clear();
   }
 
   // ---- Local media controls ----
-  Future<void> enableCamera([bool on = true]) async =>
-      _room.localParticipant?.setCameraEnabled(on);
+  Future<void> enableCamera([bool on = true]) async {
+    await _room.localParticipant?.setCameraEnabled(on);
+    _localVideoChanged.add(null);
+  }
 
   Future<void> enableMicrophone([bool on = true]) async =>
       _room.localParticipant?.setMicrophoneEnabled(on);
@@ -245,7 +397,6 @@ class AppEngine {
   Future<void> enableScreenShare([bool on = true]) async =>
       _room.localParticipant?.setScreenShareEnabled(on);
 
-  /// Local camera preview track (see AppVideoView.local).
   /// The local camera track. Used by [AppVideoView]; application code should
   /// render with `AppVideoView.local(engine)` instead.
   @internal
@@ -324,8 +475,84 @@ class AppEngine {
       final user = _userFor(p);
       _userJoined.add(user);
       for (final pub in p.trackPublications.values) {
-        if (pub.track != null) _trackSubscribed.add(user);
+        final t = pub.track;
+        if (t != null) {
+          _trackSubscribed.add(user);
+          _watchTrack(user, t);
+        }
       }
+    }
+  }
+
+  // ---- Remote health ----
+
+  /// Fold a remote track's receiver statistics into that user's health record.
+  void _watchTrack(AppRemoteUser user, lk.Track track) {
+    final h = _health.putIfAbsent(user.uid, () => _RemoteHealth());
+    final l = track.createListener();
+    h.listeners.add(l);
+    l
+      ..on<lk.VideoReceiverStatsEvent>((e) {
+        final s = e.stats;
+        h.fps = (s.framesPerSecond ?? 0).round();
+        h.width = (s.frameWidth ?? 0).toInt();
+        h.height = (s.frameHeight ?? 0).toInt();
+        h.vLost = (s.packetsLost ?? 0).toInt();
+        if (!h.firstFrameReported && (s.framesDecoded ?? 0) > 0) {
+          h.firstFrameReported = true;
+          final ms = _elapsed();
+          _firstRemoteVideoFrame.add((user.uid, ms));
+          _connectionStage.add((AppConnectionStage.firstRemoteVideoFrame, user.uid, ms));
+        }
+      })
+      ..on<lk.AudioReceiverStatsEvent>((e) {
+        final s = e.stats;
+        h.aLost = (s.packetsLost ?? 0).toInt();
+        // jitter is reported in seconds.
+        h.jitterMs = ((s.jitter ?? 0) * 1000).round();
+      });
+  }
+
+  void _unwatch(String uid) {
+    final h = _health.remove(uid);
+    if (h == null) return;
+    for (final l in h.listeners) {
+      l.dispose();
+    }
+  }
+
+  void _startStats() {
+    _statsTimer?.cancel();
+    _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!_joined) return;
+      final out = <AppRemoteStats>[];
+      _health.forEach((uid, h) {
+        final user = _users[uid];
+        if (user == null) return;
+        // A picture that had frames and now reports none has stalled.
+        final hasVideo = user.hasVideo;
+        if (hasVideo && h.fps == 0 && h.hadPicture) h.freezes++;
+        if (hasVideo && h.fps > 0) h.hadPicture = true;
+        out.add(AppRemoteStats(
+          uid: uid,
+          videoFps: h.fps,
+          videoWidth: h.width,
+          videoHeight: h.height,
+          videoFreezeCount: h.freezes,
+          videoPacketsLost: h.vLost,
+          audioPacketsLost: h.aLost,
+          audioJitterMs: h.jitterMs,
+        ));
+      });
+      if (out.isNotEmpty) _remoteStats.add(out);
+    });
+  }
+
+  void _stopStats() {
+    _statsTimer?.cancel();
+    _statsTimer = null;
+    for (final uid in _health.keys.toList()) {
+      _unwatch(uid);
     }
   }
 
@@ -341,6 +568,7 @@ class AppEngine {
       })
       ..on<lk.ParticipantDisconnectedEvent>((e) {
         final u = _users.remove(e.participant.identity);
+        _unwatch(e.participant.identity);
         if (u != null) _userLeft.add(u);
         _audienceChanged.add(audience);
       })
@@ -350,14 +578,37 @@ class AppEngine {
       ..on<lk.RoomReconnectingEvent>((_) {
         _connectionState.add(AppConnectionState.reconnecting);
       })
+      ..on<lk.RoomReconnectedEvent>((_) {
+        // Track state can change while disconnected, so rebuild the roster.
+        for (final uid in _health.keys.toList()) {
+          _unwatch(uid);
+        }
+        _users.clear();
+        _seedExistingParticipants();
+        _connectionState.add(AppConnectionState.connected);
+      })
       ..on<lk.TrackSubscribedEvent>((e) {
-        _trackSubscribed.add(_userFor(e.participant));
+        final user = _userFor(e.participant);
+        _trackSubscribed.add(user);
+        _watchTrack(user, e.track);
       })
       ..on<lk.TrackUnsubscribedEvent>((e) {
         _trackUnsubscribed.add(_userFor(e.participant));
       })
+      // Camera off→on keeps the publication and swaps the track underneath;
+      // publish/unpublish/unmute of our own camera are the moments a
+      // self-view must re-bind.
+      ..on<lk.LocalTrackPublishedEvent>((_) => _localVideoChanged.add(null))
+      ..on<lk.LocalTrackUnpublishedEvent>((_) => _localVideoChanged.add(null))
+      ..on<lk.TrackMutedEvent>((e) {
+        if (e.participant is lk.LocalParticipant) _localVideoChanged.add(null);
+      })
+      ..on<lk.TrackUnmutedEvent>((e) {
+        if (e.participant is lk.LocalParticipant) _localVideoChanged.add(null);
+      })
       ..on<lk.RoomDisconnectedEvent>((_) {
         _joined = false;
+        _stopStats();
         // Report everyone as gone; a stale roster after a disconnect made
         // remoteUsers wrong until the next join.
         for (final u in _users.values) {
@@ -420,6 +671,10 @@ class AppEngine {
     await _giftReceived.close();
     await _message.close();
     await _audienceChanged.close();
+    await _localVideoChanged.close();
+    await _remoteStats.close();
+    await _firstRemoteVideoFrame.close();
+    await _connectionStage.close();
     await _room.dispose();
   }
 

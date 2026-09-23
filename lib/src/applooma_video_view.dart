@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:applooma_rtc_core/applooma_rtc_core.dart' as lk;
 
@@ -16,6 +18,10 @@ import 'applooma_engine.dart';
 /// Nothing is drawn until that participant publishes a camera, so rebuild your
 /// UI on [AppEngine.onTrackSubscribed] as well as [AppEngine.onUserJoined] —
 /// a participant is announced before their track arrives.
+///
+/// The local view follows your camera through every restart — off/on, a
+/// camera switch, a settings change — so a self-preview never stays stuck on
+/// the last frame of a track that is gone.
 class AppVideoView extends StatelessWidget {
   // Kept private: the underlying track type is an implementation detail and
   // should never appear in application code.
@@ -30,14 +36,15 @@ class AppVideoView extends StatelessWidget {
 
   const AppVideoView._(this._track, {super.key, this.fit = BoxFit.cover, this.mirror = false});
 
-  /// Your own camera preview.
-  factory AppVideoView.local(
+  /// Your own camera preview. Re-binds by itself whenever the camera track is
+  /// replaced (see [AppEngine.onLocalVideoChanged]).
+  static Widget local(
     AppEngine engine, {
     Key? key,
     BoxFit fit = BoxFit.cover,
     bool mirror = true,
   }) =>
-      AppVideoView._(engine.localVideoTrack, key: key, fit: fit, mirror: mirror);
+      _LocalVideoView(engine, key: key, fit: fit, mirror: mirror);
 
   /// A remote participant's camera.
   factory AppVideoView.remote(
@@ -58,6 +65,61 @@ class AppVideoView extends StatelessWidget {
       track,
       fit: fit == BoxFit.contain ? lk.VideoViewFit.contain : lk.VideoViewFit.cover,
       mirrorMode: mirror ? lk.VideoViewMirrorMode.mirror : lk.VideoViewMirrorMode.off,
+    );
+  }
+}
+
+/// Self-preview that re-reads the engine's local track on every change, so
+/// camera off→on, switchCamera and settings changes never leave it drawing a
+/// dead track.
+class _LocalVideoView extends StatefulWidget {
+  final AppEngine engine;
+  final BoxFit fit;
+  final bool mirror;
+  const _LocalVideoView(this.engine, {super.key, required this.fit, required this.mirror});
+
+  @override
+  State<_LocalVideoView> createState() => _LocalVideoViewState();
+}
+
+class _LocalVideoViewState extends State<_LocalVideoView> {
+  StreamSubscription<void>? _sub;
+
+  @override
+  void initState() {
+    super.initState();
+    _sub = widget.engine.onLocalVideoChanged.listen((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant _LocalVideoView old) {
+    super.didUpdateWidget(old);
+    if (old.engine != widget.engine) {
+      _sub?.cancel();
+      _sub = widget.engine.onLocalVideoChanged.listen((_) {
+        if (mounted) setState(() {});
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _sub?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final track = widget.engine.localVideoTrack;
+    if (track == null) return const SizedBox.shrink();
+    return lk.VideoTrackRenderer(
+      track,
+      // Keyed by track so a replaced track gets a fresh renderer.
+      key: ValueKey(track.sid ?? identityHashCode(track)),
+      fit: widget.fit == BoxFit.contain ? lk.VideoViewFit.contain : lk.VideoViewFit.cover,
+      mirrorMode: widget.mirror ? lk.VideoViewMirrorMode.mirror : lk.VideoViewMirrorMode.off,
     );
   }
 }

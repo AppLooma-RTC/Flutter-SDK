@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0
+
+Parity with the Android SDK 0.4.2 – 0.4.4 fixes.
+
+- `AppEngineOptions` (`AppEngine.create(appId:, options:)`): `audioScenario`
+  (`call` / `media`), `video: AppVideoConfig` (height, fps, maxBitrate in bit/s,
+  simulcast, `codec: AppVideoCodec.auto | vp8 | h264`), `audio: AppAudioOptions`
+  (independent echo-cancellation / noise-suppression / AGC switches).
+- Codec `auto` publishes H.264 (hardware on every phone) with a VP8 backup layer
+  the server can fall back to — no more software VP8 on budget chipsets, no
+  black frame for a viewer that cannot decode the H.264 stream.
+  `engine.publishedCodec` says what was chosen.
+- Dynacast off and explicit auto-subscribe: every publisher always sends, every
+  joiner receives all tracks — fixes co-hosts seeing a black frame on flaky links.
+- Echo: the `media` scenario keeps media attributes (loudspeaker, media volume
+  keys) while running Android in the communication audio mode and iOS in
+  playAndRecord + videoChat, so the phone's echo canceller stays engaged.
+- Self-preview follows the local camera through off→on, a camera switch and
+  settings changes — `AppVideoView.local` re-binds by itself;
+  `onLocalVideoChanged` for anything else holding your preview.
+- `onRemoteStats` — per-user fps, size, freeze count, packet loss, jitter every
+  two seconds. `onFirstRemoteVideoFrame` and `onConnectionStage` for
+  join-to-picture timing.
+- Guardrails: `maxBitrate` under 10 000 logs a units warning; a non-preset
+  `height` snaps to the nearest preset with a warning.
+- Not on Flutter: post-processing `micGain` (no capture post-processor is
+  exposed to Dart) and in-room music mixing.
+
 ## 0.2.0
 
 - Signaling: `sendMessage`, `onMessage`, `audience`, `audienceCount`, `hosts` and
