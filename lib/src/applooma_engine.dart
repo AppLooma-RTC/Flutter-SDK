@@ -394,6 +394,18 @@ class AppEngine {
   Future<void> enableMicrophone([bool on = true]) async =>
       _room.localParticipant?.setMicrophoneEnabled(on);
 
+  bool _backCamera = false;
+
+  /// Flip between the front and back cameras. Does nothing until the camera is
+  /// on. Every [AppVideoView.local] follows the new track by itself.
+  Future<void> switchCamera() async {
+    final track = localVideoTrack;
+    if (track is! lk.LocalVideoTrack) return;
+    _backCamera = !_backCamera;
+    await track.setCameraPosition(_backCamera ? lk.CameraPosition.back : lk.CameraPosition.front);
+    _localVideoChanged.add(null);
+  }
+
   Future<void> enableScreenShare([bool on = true]) async =>
       _room.localParticipant?.setScreenShareEnabled(on);
 

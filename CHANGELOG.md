@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- `switchCamera()` — flip between the front and back cameras; the local preview follows.
+
 ## 0.3.0
 
 Parity with the Android SDK 0.4.2 – 0.4.4 fixes.
