@@ -1,0 +1,9 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    # The audio-session configuration API in the core package is marked
+    # experimental. We wrap it deliberately (it is what keeps the echo canceller
+    # engaged on the loudspeaker) and pin the core version, so the warning is
+    # noise here — and CI treats warnings as failures.
+    experimental_member_use: ignore

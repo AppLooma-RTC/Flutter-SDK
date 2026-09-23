@@ -5,7 +5,7 @@
 /// final engine = AppEngine.create(appId: 'YOUR_APP_ID');
 /// await engine.joinChannel(token: token, wsUrl: wsUrl, options: AppJoinOptions(role: AppRole.host));
 /// ```
-library applooma_rtc;
+library;
 
 export 'src/applooma_engine.dart';
 export 'src/applooma_types.dart';
