@@ -7,3 +7,5 @@ analyzer:
     # engaged on the loudspeaker) and pin the core version, so the warning is
     # noise here — and CI treats warnings as failures.
     experimental_member_use: ignore
+  exclude:
+    - build/**
