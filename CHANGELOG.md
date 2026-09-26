@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.2
+
+- Android: `AppVideoCodec.auto` now publishes VP8. The engine only drives Qualcomm/Exynos H.264 hardware encoders; on MediaTek and other chipsets an H.264 track was published without a single frame and viewers saw black. Pass `AppVideoCodec.h264` explicitly on devices you have verified.
+
 ## 0.3.1
 
 - `switchCamera()` — flip between the front and back cameras; the local preview follows.

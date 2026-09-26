@@ -228,9 +228,13 @@ class AppEngine {
       case AppVideoCodec.h264:
         return 'h264';
       case AppVideoCodec.auto:
-        // Every Android and iOS phone encodes H.264 in hardware; software VP8
-        // at 720p/30 + simulcast drops frames and starves audio on budget
-        // chipsets. A VP8 backup layer covers viewers that cannot decode it.
+        // iOS encodes H.264 in hardware everywhere. On Android the engine only
+        // drives Qualcomm/Exynos H.264 encoders; on MediaTek and other chips an
+        // H.264 track is published but never carries a frame (viewers see
+        // black — seen on realme/Infinix). Dart cannot inspect the codec list,
+        // so Android publishes VP8, which works in hardware or software on
+        // every phone. Pass AppVideoCodec.h264 explicitly on known-good devices.
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) return 'vp8';
         return 'h264';
     }
   }
