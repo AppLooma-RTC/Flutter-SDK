@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.3
+
+- `AppVideoConfig.degradation` — `AppVideoDegradation.keepResolution` / `keepFramerate` / `balanced` / `auto` (what the encoder gives up first under pressure); `AppVideoConfig.minBitrate` (reserved — the engine exposes no per-sender floor on this platform yet).
+- Default bitrate caps raised when `maxBitrate` is 0: 4 Mbps at 1080p, 2.2 Mbps at 720p (was 3 / 1.7). New `height: 1440` preset (2560×1440, 5 Mbps, 30 fps).
+- `AppVideoCodec.h265` — published on iOS (hardware on every iPhone since the 7), falls back to `auto` on Android; `AppVideoCodec.av1` falls back to `auto` with a warning. Every codec but VP8 keeps the VP8 backup layer.
+- `onVideoQualityChanged` — `AppVideoQualityInfo { width, height, fps, bitrateKbps, layer, reason }` for your own camera, from sender statistics, whenever the layer, size or reason changes.
+- Bluetooth headsets: `setSpeakerphone(bool)` chooses between the phone's speaker and earpiece while a connected Bluetooth or wired headset keeps priority. On Android 12+ the app must hold `BLUETOOTH_CONNECT` at runtime (`Permission.bluetoothConnect`) for a headset to be routed to at all — see the docs; the UIKit asks for it.
+
 ## 0.3.2
 
 - Android: `AppVideoCodec.auto` now publishes VP8. The engine only drives Qualcomm/Exynos H.264 hardware encoders; on MediaTek and other chipsets an H.264 track was published without a single frame and viewers saw black. Pass `AppVideoCodec.h264` explicitly on devices you have verified.

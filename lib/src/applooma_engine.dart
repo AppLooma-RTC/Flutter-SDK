@@ -165,6 +165,10 @@ class AppEngine {
   final _remoteStats = StreamController<List<AppRemoteStats>>.broadcast();
   final _firstRemoteVideoFrame = StreamController<(String, int)>.broadcast();
   final _connectionStage = StreamController<(AppConnectionStage, String?, int)>.broadcast();
+  final _videoQuality = StreamController<AppVideoQualityInfo>.broadcast();
+  lk.EventsListener<lk.TrackEvent>? _localVideoListener;
+  lk.Track? _watchedLocalVideo;
+  AppVideoQualityInfo? _lastQuality;
 
   Stream<AppRemoteUser> get onUserJoined => _userJoined.stream;
   Stream<AppRemoteUser> get onUserLeft => _userLeft.stream;
@@ -205,7 +209,22 @@ class AppEngine {
   /// Milestones with elapsed ms since [joinChannel]: `(stage, uid, elapsedMs)`.
   Stream<(AppConnectionStage, String?, int)> get onConnectionStage => _connectionStage.stream;
 
+  /// The size, rate or layer your own camera is sending changed — the encoder
+  /// stepped down for the network or the CPU, or came back up. Resolved from
+  /// sender statistics while your camera is on.
+  Stream<AppVideoQualityInfo> get onVideoQualityChanged => _videoQuality.stream;
+
   AppEngine._(this.appId, this.options) : _room = lk.Room(roomOptions: _roomOptions(options));
+
+  static const _heights = [360, 540, 720, 1080, 1440];
+
+  static int _snapHeight(int wanted) {
+    var height = _heights.first;
+    for (final h in _heights) {
+      if ((h - wanted).abs() < (height - wanted).abs()) height = h;
+    }
+    return height;
+  }
 
   static lk.VideoParameters _preset(int height) {
     switch (height) {
@@ -215,10 +234,29 @@ class AppEngine {
         return lk.VideoParametersPresets.h540_169;
       case 720:
         return lk.VideoParametersPresets.h720_169;
+      case 1440:
+        return lk.VideoParametersPresets.h1440_169;
       default:
         return lk.VideoParametersPresets.h1080_169;
     }
   }
+
+  /// Our own caps for the sharp end: the preset defaults were tuned for calls
+  /// and leave 1080p visibly soft on a good link. 540p and below keep theirs.
+  static int _defaultMaxBitrate(int height, lk.VideoParameters preset) {
+    switch (height) {
+      case 1440:
+        return 5000000;
+      case 1080:
+        return 4000000;
+      case 720:
+        return 2200000;
+      default:
+        return preset.encoding?.maxBitrate ?? 1700000;
+    }
+  }
+
+  static bool get _isAndroid => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
   /// The codec published for [config] once [AppVideoCodec.auto] is resolved.
   static String resolveCodec(AppVideoCodec c) {
@@ -227,6 +265,21 @@ class AppEngine {
         return 'vp8';
       case AppVideoCodec.h264:
         return 'h264';
+      case AppVideoCodec.h265:
+        // Every iPhone since the 7 encodes H.265 in hardware. On Android the
+        // engine's encoder factory does not drive H.265 hardware, and Dart
+        // cannot probe for it, so the auto choice is made instead.
+        if (_isAndroid) {
+          debugPrint('[AppLoomaRTC] AppVideoCodec.h265 is not available on Android; using auto');
+          return resolveCodec(AppVideoCodec.auto);
+        }
+        return 'h265';
+      case AppVideoCodec.av1:
+        // No iPhone encodes AV1 in hardware, and Android phones that do are
+        // rare and cannot be probed from Dart; software AV1 at camera sizes
+        // would starve the CPU. The auto choice is made instead.
+        debugPrint('[AppLoomaRTC] AppVideoCodec.av1 is not available on this platform; using auto');
+        return resolveCodec(AppVideoCodec.auto);
       case AppVideoCodec.auto:
         // iOS encodes H.264 in hardware everywhere. On Android the engine only
         // drives Qualcomm/Exynos H.264 encoders; on MediaTek and other chips an
@@ -234,17 +287,27 @@ class AppEngine {
         // black — seen on realme/Infinix). Dart cannot inspect the codec list,
         // so Android publishes VP8, which works in hardware or software on
         // every phone. Pass AppVideoCodec.h264 explicitly on known-good devices.
-        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) return 'vp8';
+        if (_isAndroid) return 'vp8';
         return 'h264';
     }
   }
 
-  static lk.RoomOptions _roomOptions(AppEngineOptions o) {
-    const heights = [360, 540, 720, 1080];
-    var height = heights.first;
-    for (final h in heights) {
-      if ((h - o.video.height).abs() < (height - o.video.height).abs()) height = h;
+  /// `auto` leaves the engine's per-source default (frame rate first for a camera).
+  static lk.DegradationPreference? _degradation(AppVideoDegradation d) {
+    switch (d) {
+      case AppVideoDegradation.keepResolution:
+        return lk.DegradationPreference.maintainResolution;
+      case AppVideoDegradation.keepFramerate:
+        return lk.DegradationPreference.maintainFramerate;
+      case AppVideoDegradation.balanced:
+        return lk.DegradationPreference.balanced;
+      case AppVideoDegradation.auto:
+        return null;
     }
+  }
+
+  static lk.RoomOptions _roomOptions(AppEngineOptions o) {
+    final height = _snapHeight(o.video.height);
     if (height != o.video.height) {
       debugPrint('[AppLoomaRTC] AppVideoConfig.height=${o.video.height} is not a preset; using ${height}p');
     }
@@ -252,8 +315,10 @@ class AppEngine {
       debugPrint('[AppLoomaRTC] AppVideoConfig.maxBitrate=${o.video.maxBitrate} is in bits per second — did you mean ${o.video.maxBitrate}000 (kbps)?');
     }
     final preset = _preset(height);
+    // minBitrate: the engine's encoding carries no floor on this platform, so
+    // AppVideoConfig.minBitrate is not applied here.
     final encoding = lk.VideoEncoding(
-      maxBitrate: o.video.maxBitrate > 0 ? o.video.maxBitrate : (preset.encoding?.maxBitrate ?? 1700000),
+      maxBitrate: o.video.maxBitrate > 0 ? o.video.maxBitrate : _defaultMaxBitrate(height, preset),
       maxFramerate: o.video.fps,
     );
     final codec = resolveCodec(o.video.codec);
@@ -269,10 +334,11 @@ class AppEngine {
         videoCodec: codec,
         videoEncoding: encoding,
         simulcast: o.video.simulcast,
-        // When H.264 is published, a VP8 layer rides along as backup so a
-        // viewer whose phone cannot decode the H.264 stream is served VP8 by
-        // the server instead of a black frame.
-        backupVideoCodec: codec == 'h264'
+        degradationPreference: _degradation(o.video.degradation),
+        // Anything but VP8 rides with a VP8 backup layer, so a viewer whose
+        // phone cannot decode the main stream is served VP8 by the server
+        // instead of a black frame.
+        backupVideoCodec: codec != 'vp8'
             ? lk.BackupVideoCodec(enabled: true, codec: 'vp8', simulcast: o.video.simulcast)
             : const lk.BackupVideoCodec(enabled: false),
       ),
@@ -413,6 +479,21 @@ class AppEngine {
   Future<void> enableScreenShare([bool on = true]) async =>
       _room.localParticipant?.setScreenShareEnabled(on);
 
+  /// Route audio to the loudspeaker (true) or the earpiece (false). A
+  /// connected Bluetooth or wired headset keeps priority either way — this only
+  /// decides between the phone's own outputs when no headset is present.
+  ///
+  /// Android 12+ needs the `BLUETOOTH_CONNECT` runtime permission for a
+  /// Bluetooth headset to be seen at all; request it next to the microphone.
+  Future<void> setSpeakerphone(bool on) async {
+    if (!_isMobile) return;
+    try {
+      await lk.AudioManager.instance.setSpeakerOutputPreferred(on);
+    } catch (e) {
+      debugPrint('[AppLoomaRTC] setSpeakerphone: $e');
+    }
+  }
+
   /// The local camera track. Used by [AppVideoView]; application code should
   /// render with `AppVideoView.local(engine)` instead.
   @internal
@@ -529,6 +610,76 @@ class AppEngine {
       });
   }
 
+  // ---- Own camera quality ----
+
+  /// Follow the sender statistics of whatever local camera track is live, and
+  /// report a change of size, layer or reason on [onVideoQualityChanged].
+  void _watchLocalVideo() {
+    final track = localVideoTrack;
+    if (identical(track, _watchedLocalVideo)) return;
+    _localVideoListener?.dispose();
+    _localVideoListener = null;
+    _watchedLocalVideo = track;
+    _lastQuality = null;
+    if (track == null) return;
+    final l = track.createListener();
+    _localVideoListener = l;
+    l.on<lk.VideoSenderStatsEvent>((e) {
+      final active = e.stats.values
+          .where((s) => (s.framesPerSecond ?? 0) > 0 && (s.frameHeight ?? 0) > 0)
+          .toList();
+      if (active.isEmpty) return;
+      var top = active.first;
+      for (final s in active) {
+        if ((s.frameHeight ?? 0) > (top.frameHeight ?? 0)) top = s;
+      }
+      final height = (top.frameHeight ?? 0).toInt();
+      final q = AppVideoQualityInfo(
+        width: (top.frameWidth ?? 0).toInt(),
+        height: height,
+        fps: (top.framesPerSecond ?? 0).round(),
+        bitrateKbps: (e.currentBitrate / 1000).round(),
+        layer: _layerOf(top.rid, height, _snapHeight(options.video.height)),
+        reason: _reasonOf(top.qualityLimitationReason),
+      );
+      final prev = _lastQuality;
+      _lastQuality = q;
+      if (prev == null) return; // the first sample is the baseline, not a change
+      final same = prev.width == q.width &&
+          prev.height == q.height &&
+          prev.layer == q.layer &&
+          prev.reason == q.reason &&
+          (prev.fps - q.fps).abs() < 5;
+      if (!same) _videoQuality.add(q);
+    });
+  }
+
+  /// Simulcast rid → layer; without a rid, by size relative to what was configured.
+  static AppVideoLayer _layerOf(String? rid, int height, int configured) {
+    switch (rid) {
+      case 'f':
+        return AppVideoLayer.high;
+      case 'h':
+        return AppVideoLayer.medium;
+      case 'q':
+        return AppVideoLayer.low;
+    }
+    if (height >= configured * 0.75) return AppVideoLayer.high;
+    if (height >= configured * 0.4) return AppVideoLayer.medium;
+    return AppVideoLayer.low;
+  }
+
+  static AppVideoQualityReason _reasonOf(String? r) {
+    switch (r) {
+      case 'bandwidth':
+        return AppVideoQualityReason.bandwidth;
+      case 'cpu':
+        return AppVideoQualityReason.cpu;
+      default:
+        return AppVideoQualityReason.none;
+    }
+  }
+
   void _unwatch(String uid) {
     final h = _health.remove(uid);
     if (h == null) return;
@@ -541,6 +692,9 @@ class AppEngine {
     _statsTimer?.cancel();
     _statsTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (!_joined) return;
+      // The local camera may have been swapped by a path that raised no
+      // event; the tick keeps the quality watcher on the live track.
+      _watchLocalVideo();
       final out = <AppRemoteStats>[];
       _health.forEach((uid, h) {
         final user = _users[uid];
@@ -570,6 +724,10 @@ class AppEngine {
     for (final uid in _health.keys.toList()) {
       _unwatch(uid);
     }
+    _localVideoListener?.dispose();
+    _localVideoListener = null;
+    _watchedLocalVideo = null;
+    _lastQuality = null;
   }
 
   void _wireEvents() {
@@ -614,8 +772,14 @@ class AppEngine {
       // Camera off→on keeps the publication and swaps the track underneath;
       // publish/unpublish/unmute of our own camera are the moments a
       // self-view must re-bind.
-      ..on<lk.LocalTrackPublishedEvent>((_) => _localVideoChanged.add(null))
-      ..on<lk.LocalTrackUnpublishedEvent>((_) => _localVideoChanged.add(null))
+      ..on<lk.LocalTrackPublishedEvent>((_) {
+        _localVideoChanged.add(null);
+        _watchLocalVideo();
+      })
+      ..on<lk.LocalTrackUnpublishedEvent>((_) {
+        _localVideoChanged.add(null);
+        _watchLocalVideo();
+      })
       ..on<lk.TrackMutedEvent>((e) {
         if (e.participant is lk.LocalParticipant) _localVideoChanged.add(null);
       })
@@ -691,6 +855,7 @@ class AppEngine {
     await _remoteStats.close();
     await _firstRemoteVideoFrame.close();
     await _connectionStage.close();
+    await _videoQuality.close();
     await _room.dispose();
   }
 

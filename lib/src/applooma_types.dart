@@ -25,35 +25,96 @@ enum AppAudioScenario { call, media }
 /// decode the H.264 stream still gets a picture. Force one only for a known
 /// fleet. (Flutter cannot probe the phone's encoder list the way the native
 /// Android SDK does, so [auto] does not pick VP8 on VP8-hardware phones.)
-enum AppVideoCodec { auto, vp8, h264 }
+///
+/// [h265] and [av1] are opt-in. Dart cannot probe the phone's encoder list, so:
+/// on iOS [h265] is published (hardware on every iPhone since the 7) with a
+/// VP8 backup layer; on Android [h265] and [av1] fall back to [auto] with a
+/// warning, and on iOS [av1] does too (no iPhone encodes AV1 in hardware).
+enum AppVideoCodec { auto, vp8, h264, h265, av1 }
+
+/// What the encoder gives up first when the network or the CPU cannot carry
+/// the full picture.
+///
+/// [auto] (default) is the engine's choice for a camera — frame rate is kept
+/// and resolution drops, which looks smoothest in a call. [keepResolution]
+/// keeps the picture sharp and drops frames instead — for a 1080p broadcast
+/// where crispness is the product. [keepFramerate] keeps motion smooth and
+/// lets the picture soften. [balanced] gives up a little of each.
+enum AppVideoDegradation { auto, keepResolution, keepFramerate, balanced }
 
 /// Capture and encode settings for your own camera.
 ///
 /// [maxBitrate] is in **bits per second** — `1900000` for 1.9 Mbps. A value
 /// under 10 000 is almost certainly kbps by mistake and is logged as a warning.
-/// [height] must be one of 360 / 540 / 720 / 1080; anything else snaps to the
-/// nearest preset (also logged).
+/// [height] must be one of 360 / 540 / 720 / 1080 / 1440; anything else snaps
+/// to the nearest preset (also logged).
+///
+/// When [maxBitrate] is 0 the cap is 5 Mbps at 1440p, 4 Mbps at 1080p,
+/// 2.2 Mbps at 720p, and the preset default below that.
 class AppVideoConfig {
-  /// 360, 540, 720 or 1080 — the short edge of a 16:9 frame.
+  /// 360, 540, 720, 1080 or 1440 — the short edge of a 16:9 frame.
   final int height;
   final int fps;
 
-  /// Cap on the encoder's bitrate in bits per second; 0 = the preset's default.
+  /// Cap on the encoder's bitrate in bits per second; 0 = our default for the height.
   final int maxBitrate;
+
+  /// Floor on the encoder's bitrate in bits per second; 0 = engine default.
+  ///
+  /// Reserved: the engine exposes no per-sender minimum on this platform
+  /// today, so the value is kept but does not change what is sent.
+  final int minBitrate;
 
   /// Three layers so weak links still get a picture. Off = one layer only.
   final bool simulcast;
 
-  /// VP8, H.264, or let the engine choose.
+  /// VP8, H.264, H.265, AV1, or let the engine choose.
   final AppVideoCodec codec;
+
+  /// What to give up first under pressure. See [AppVideoDegradation].
+  final AppVideoDegradation degradation;
 
   const AppVideoConfig({
     this.height = 1080,
     this.fps = 30,
     this.maxBitrate = 0,
+    this.minBitrate = 0,
     this.simulcast = true,
     this.codec = AppVideoCodec.auto,
+    this.degradation = AppVideoDegradation.auto,
   });
+}
+
+/// Which of your simulcast layers the numbers in [AppVideoQualityInfo] describe.
+enum AppVideoLayer { high, medium, low }
+
+/// Why the encoder is not sending the full picture, when it is not.
+enum AppVideoQualityReason { bandwidth, cpu, none }
+
+/// What your own camera is actually sending right now — the top layer that
+/// carries frames, its size, rate and bitrate, and why it is not the full
+/// picture if it is not. Delivered on [AppEngine.onVideoQualityChanged]
+/// whenever any of it changes while the camera is on.
+class AppVideoQualityInfo {
+  final int width;
+  final int height;
+  final int fps;
+  final int bitrateKbps;
+  final AppVideoLayer layer;
+  final AppVideoQualityReason reason;
+
+  const AppVideoQualityInfo({
+    required this.width,
+    required this.height,
+    required this.fps,
+    required this.bitrateKbps,
+    required this.layer,
+    required this.reason,
+  });
+
+  @override
+  String toString() =>
+      'AppVideoQualityInfo(${width}x$height @$fps fps, $bitrateKbps kbps, ${layer.name}, ${reason.name})';
 }
 
 /// Microphone processing. Each stage can be switched independently; all are
