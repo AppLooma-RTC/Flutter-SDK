@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- `AppVideoMode` on `AppVideoConfig.mode`: `stableHd` (new default), `ultraHd4k` (premium, opt-in), `adaptive` (the previous behaviour). `stableHd` publishes one layer (no simulcast), keeps resolution under pressure and turns adaptive stream off: 1080p30 at 3.5 Mbps on iOS, 720p30 at 1.8 Mbps on Android (Dart cannot check the encoder for hardware).
+- `ultraHd4k`: 2160p30, one layer, H.265 at 16 Mbps, resolution kept — iOS only for now; on Android it falls back to `stableHd` with a warning. `AppEngine.isUltraHdSupported()` returns the check.
+- Fields set explicitly still win over the mode. `AppVideoConfig.height` now defaults to 0 (= by mode) and `simulcast` is `bool?` (null = by mode); `degradation: auto` means `keepResolution` outside `adaptive`. `height: 2160` is a new preset.
+
 ## 0.3.3
 
 - `AppVideoConfig.degradation` — `AppVideoDegradation.keepResolution` / `keepFramerate` / `balanced` / `auto` (what the encoder gives up first under pressure); `AppVideoConfig.minBitrate` (reserved — the engine exposes no per-sender floor on this platform yet).

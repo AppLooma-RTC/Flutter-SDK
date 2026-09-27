@@ -216,7 +216,7 @@ class AppEngine {
 
   AppEngine._(this.appId, this.options) : _room = lk.Room(roomOptions: _roomOptions(options));
 
-  static const _heights = [360, 540, 720, 1080, 1440];
+  static const _heights = [360, 540, 720, 1080, 1440, 2160];
 
   static int _snapHeight(int wanted) {
     var height = _heights.first;
@@ -236,23 +236,54 @@ class AppEngine {
         return lk.VideoParametersPresets.h720_169;
       case 1440:
         return lk.VideoParametersPresets.h1440_169;
+      case 2160:
+        return lk.VideoParametersPresets.h2160_169;
       default:
         return lk.VideoParametersPresets.h1080_169;
     }
   }
 
-  /// Our own caps for the sharp end: the preset defaults were tuned for calls
-  /// and leave 1080p visibly soft on a good link. 540p and below keep theirs.
-  static int _defaultMaxBitrate(int height, lk.VideoParameters preset) {
+  /// Our own caps. [AppVideoMode.adaptive] keeps the earlier sharp-end caps
+  /// (the preset defaults were tuned for calls and leave 1080p visibly soft);
+  /// 540p and below keep the preset's.
+  static int _defaultMaxBitrate(int height, lk.VideoParameters preset, AppVideoMode mode, String codec) {
     switch (height) {
+      case 2160:
+        return codec == 'h265' ? 16000000 : 25000000;
       case 1440:
         return 5000000;
       case 1080:
-        return 4000000;
+        return mode == AppVideoMode.adaptive ? 4000000 : 3500000;
       case 720:
-        return 2200000;
+        return mode == AppVideoMode.adaptive ? 2200000 : 1800000;
       default:
         return preset.encoding?.maxBitrate ?? 1700000;
+    }
+  }
+
+  static bool get _isIOS => !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
+
+  /// Whether this device can publish [AppVideoMode.ultraHd4k]. iOS: yes (every
+  /// supported iPhone encodes 2160p in hardware). Android and web: no for now —
+  /// Dart cannot check the encoders for a hardware 3840x2160 path, and a CPU
+  /// encoder cannot hold it.
+  static bool isUltraHdSupported() => _isIOS;
+
+  /// The mode in force for [c], after an unsupported ultraHd4k falls back.
+  static AppVideoMode _modeOf(AppVideoConfig c) =>
+      c.mode == AppVideoMode.ultraHd4k && !isUltraHdSupported() ? AppVideoMode.stableHd : c.mode;
+
+  /// The height [c] captures at on this device once the mode fills in the blanks.
+  static int _heightOf(AppVideoConfig c) {
+    if (c.height > 0) return _snapHeight(c.height);
+    switch (_modeOf(c)) {
+      case AppVideoMode.ultraHd4k:
+        return 2160;
+      case AppVideoMode.stableHd:
+        // iOS encodes in hardware everywhere; Android may be on a CPU encoder.
+        return _isIOS ? 1080 : 720;
+      case AppVideoMode.adaptive:
+        return 1080;
     }
   }
 
@@ -307,39 +338,53 @@ class AppEngine {
   }
 
   static lk.RoomOptions _roomOptions(AppEngineOptions o) {
-    final height = _snapHeight(o.video.height);
-    if (height != o.video.height) {
+    if (o.video.mode == AppVideoMode.ultraHd4k && !isUltraHdSupported()) {
+      debugPrint('[AppLoomaRTC] AppVideoMode.ultraHd4k is not supported on this device; using stableHd');
+    }
+    final mode = _modeOf(o.video);
+    final height = _heightOf(o.video);
+    if (o.video.height > 0 && height != o.video.height) {
       debugPrint('[AppLoomaRTC] AppVideoConfig.height=${o.video.height} is not a preset; using ${height}p');
     }
     if (o.video.maxBitrate > 0 && o.video.maxBitrate < 10000) {
       debugPrint('[AppLoomaRTC] AppVideoConfig.maxBitrate=${o.video.maxBitrate} is in bits per second — did you mean ${o.video.maxBitrate}000 (kbps)?');
     }
     final preset = _preset(height);
+    // In ultraHd4k, auto prefers H.265 where the phone encodes it (iOS).
+    final codec = o.video.codec == AppVideoCodec.auto && mode == AppVideoMode.ultraHd4k && _isIOS
+        ? 'h265'
+        : resolveCodec(o.video.codec);
     // minBitrate: the engine's encoding carries no floor on this platform, so
-    // AppVideoConfig.minBitrate is not applied here.
+    // AppVideoConfig.minBitrate is not applied here. No start-bitrate hook is
+    // exposed either; the encoder ramps up to the cap on its own.
     final encoding = lk.VideoEncoding(
-      maxBitrate: o.video.maxBitrate > 0 ? o.video.maxBitrate : _defaultMaxBitrate(height, preset),
+      maxBitrate: o.video.maxBitrate > 0 ? o.video.maxBitrate : _defaultMaxBitrate(height, preset, mode, codec),
       maxFramerate: o.video.fps,
     );
-    final codec = resolveCodec(o.video.codec);
+    final simulcast = o.video.simulcast ?? mode == AppVideoMode.adaptive;
+    final degradation = o.video.degradation == AppVideoDegradation.auto && mode != AppVideoMode.adaptive
+        ? AppVideoDegradation.keepResolution
+        : o.video.degradation;
     return lk.RoomOptions(
-      // Adaptive stream still down-shifts a remote layer for a small or hidden
-      // view (good on weak links). Dynacast is OFF: with it on, a publisher
-      // withholds a video layer until a subscriber's "viewing" signal arrives,
-      // which on flaky links left co-hosts staring at a black frame.
-      adaptiveStream: true,
+      // adaptive: adaptive stream down-shifts a remote layer for a small or
+      // hidden view (good on weak links). stableHd / ultraHd4k turn it off so
+      // a receiver keeps the full picture. Dynacast is OFF: with it on, a
+      // publisher withholds a video layer until a subscriber's "viewing"
+      // signal arrives, which on flaky links left co-hosts staring at a black
+      // frame.
+      adaptiveStream: mode == AppVideoMode.adaptive,
       dynacast: false,
       defaultCameraCaptureOptions: lk.CameraCaptureOptions(params: preset),
       defaultVideoPublishOptions: lk.VideoPublishOptions(
         videoCodec: codec,
         videoEncoding: encoding,
-        simulcast: o.video.simulcast,
-        degradationPreference: _degradation(o.video.degradation),
+        simulcast: simulcast,
+        degradationPreference: _degradation(degradation),
         // Anything but VP8 rides with a VP8 backup layer, so a viewer whose
         // phone cannot decode the main stream is served VP8 by the server
         // instead of a black frame.
         backupVideoCodec: codec != 'vp8'
-            ? lk.BackupVideoCodec(enabled: true, codec: 'vp8', simulcast: o.video.simulcast)
+            ? lk.BackupVideoCodec(enabled: true, codec: 'vp8', simulcast: simulcast)
             : const lk.BackupVideoCodec(enabled: false),
       ),
       defaultAudioCaptureOptions: lk.AudioCaptureOptions(
@@ -401,7 +446,9 @@ class AppEngine {
   }
 
   /// The codec this phone publishes with, after [AppVideoCodec.auto] is resolved.
-  String get publishedCodec => resolveCodec(options.video.codec);
+  String get publishedCodec => options.video.codec == AppVideoCodec.auto && _modeOf(options.video) == AppVideoMode.ultraHd4k && _isIOS
+      ? 'h265'
+      : resolveCodec(options.video.codec);
 
   int _elapsed() => _joinStartedAt == null ? 0 : DateTime.now().difference(_joinStartedAt!).inMilliseconds;
 
@@ -639,7 +686,7 @@ class AppEngine {
         height: height,
         fps: (top.framesPerSecond ?? 0).round(),
         bitrateKbps: (e.currentBitrate / 1000).round(),
-        layer: _layerOf(top.rid, height, _snapHeight(options.video.height)),
+        layer: _layerOf(top.rid, height, _heightOf(options.video)),
         reason: _reasonOf(top.qualityLimitationReason),
       );
       final prev = _lastQuality;

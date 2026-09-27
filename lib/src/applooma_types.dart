@@ -42,17 +42,43 @@ enum AppVideoCodec { auto, vp8, h264, h265, av1 }
 /// lets the picture soften. [balanced] gives up a little of each.
 enum AppVideoDegradation { auto, keepResolution, keepFramerate, balanced }
 
+/// How the SDK tunes your camera when you leave the details to it.
+///
+/// [stableHd] (default) holds one steady HD picture: a single layer,
+/// resolution kept under pressure (frame rate gives way first) and receivers
+/// pinned to the full picture. 1080p30 at 3.5 Mbps on iOS; 720p30 at 1.8 Mbps
+/// on Android, where Dart cannot check the encoder for hardware.
+///
+/// [ultraHd4k] is the premium mode: 2160p30, one layer, resolution kept, H.265
+/// at 16 Mbps on iOS. Android falls back to [stableHd] with a warning (see
+/// [AppEngine.isUltraHdSupported]). Both ends need a strong network (20 Mbps
+/// or more each way recommended) and the phone runs warmer.
+///
+/// [adaptive] is the earlier behaviour: three layers, receivers switch layers
+/// by view size and network, resolution may drop to keep motion smooth.
+///
+/// Any field you set explicitly on [AppVideoConfig] wins over the mode.
+enum AppVideoMode { stableHd, ultraHd4k, adaptive }
+
 /// Capture and encode settings for your own camera.
+///
+/// [mode] picks sensible values for everything below; see [AppVideoMode].
+/// Fields left at their default follow the mode, fields you set win.
 ///
 /// [maxBitrate] is in **bits per second** — `1900000` for 1.9 Mbps. A value
 /// under 10 000 is almost certainly kbps by mistake and is logged as a warning.
-/// [height] must be one of 360 / 540 / 720 / 1080 / 1440; anything else snaps
-/// to the nearest preset (also logged).
+/// [height] must be one of 360 / 540 / 720 / 1080 / 1440 / 2160; anything else
+/// snaps to the nearest preset (also logged). 0 = chosen by the mode.
 ///
-/// When [maxBitrate] is 0 the cap is 5 Mbps at 1440p, 4 Mbps at 1080p,
-/// 2.2 Mbps at 720p, and the preset default below that.
+/// When [maxBitrate] is 0 the cap comes from the mode: 3.5 Mbps at 1080p and
+/// 1.8 Mbps at 720p for [AppVideoMode.stableHd], 16 or 25 Mbps for
+/// [AppVideoMode.ultraHd4k]; in [AppVideoMode.adaptive] 5 Mbps at 1440p,
+/// 4 Mbps at 1080p, 2.2 Mbps at 720p, and the preset default below that.
 class AppVideoConfig {
-  /// 360, 540, 720, 1080 or 1440 — the short edge of a 16:9 frame.
+  /// The overall tuning; see [AppVideoMode].
+  final AppVideoMode mode;
+
+  /// 360, 540, 720, 1080, 1440 or 2160 — the short edge of a 16:9 frame. 0 = chosen by [mode].
   final int height;
   final int fps;
 
@@ -65,21 +91,24 @@ class AppVideoConfig {
   /// today, so the value is kept but does not change what is sent.
   final int minBitrate;
 
-  /// Three layers so weak links still get a picture. Off = one layer only.
-  final bool simulcast;
+  /// Three layers so weak links still get a picture; false = one layer only.
+  /// null = chosen by [mode] (on in adaptive, off in stableHd and ultraHd4k).
+  final bool? simulcast;
 
   /// VP8, H.264, H.265, AV1, or let the engine choose.
   final AppVideoCodec codec;
 
   /// What to give up first under pressure. See [AppVideoDegradation].
+  /// auto = chosen by [mode] (keepResolution in stableHd and ultraHd4k).
   final AppVideoDegradation degradation;
 
   const AppVideoConfig({
-    this.height = 1080,
+    this.mode = AppVideoMode.stableHd,
+    this.height = 0,
     this.fps = 30,
     this.maxBitrate = 0,
     this.minBitrate = 0,
-    this.simulcast = true,
+    this.simulcast,
     this.codec = AppVideoCodec.auto,
     this.degradation = AppVideoDegradation.auto,
   });
