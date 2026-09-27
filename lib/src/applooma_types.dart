@@ -275,3 +275,38 @@ class AppGiftEvent {
     }
   }
 }
+
+/// Why automatic codec recovery switched how your camera is encoded.
+enum AppVideoCodecFallbackReason {
+  /// The encoder produced no frames or no key frame.
+  noFrames('no_frames'),
+
+  /// The encoder failed to start or to encode.
+  encoderError('encoder_error'),
+
+  /// Viewers reported they receive your camera but get no picture.
+  viewersCannotDecode('viewers_cannot_decode');
+
+  const AppVideoCodecFallbackReason(this.value);
+
+  /// The wire value, the same on every platform.
+  final String value;
+}
+
+/// Delivered on `AppEngine.onVideoCodecFallback`: your camera was republished
+/// on a safer path by itself (viewers see about half a second of
+/// interruption). For logs and support; the app has nothing to do.
+class AppVideoCodecFallback {
+  /// The codec before, e.g. `h264`.
+  final String from;
+
+  /// The codec after, e.g. `vp8`; `vp8:single` when a VP8 camera was
+  /// republished as one layer.
+  final String to;
+  final AppVideoCodecFallbackReason reason;
+
+  const AppVideoCodecFallback({required this.from, required this.to, required this.reason});
+
+  @override
+  String toString() => 'AppVideoCodecFallback($from -> $to, ${reason.value})';
+}

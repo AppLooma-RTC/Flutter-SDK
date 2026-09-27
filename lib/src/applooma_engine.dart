@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' as io;
 
 import 'package:applooma_rtc_core/applooma_rtc_core.dart' as lk;
 import 'package:flutter/foundation.dart';
@@ -131,6 +132,9 @@ class _RemoteHealth {
   int fps = 0, width = 0, height = 0, vLost = 0, aLost = 0, jitterMs = 0, freezes = 0;
   bool hadPicture = false;
   bool firstFrameReported = false;
+  // Automatic codec recovery, viewer side.
+  DateTime? noFrameSince;
+  DateTime? lastReportAt;
   final listeners = <lk.EventsListener<lk.TrackEvent>>[];
 }
 
@@ -166,6 +170,15 @@ class AppEngine {
   final _firstRemoteVideoFrame = StreamController<(String, int)>.broadcast();
   final _connectionStage = StreamController<(AppConnectionStage, String?, int)>.broadcast();
   final _videoQuality = StreamController<AppVideoQualityInfo>.broadcast();
+  final _codecFallback = StreamController<AppVideoCodecFallback>.broadcast();
+  // Automatic codec recovery, publisher side.
+  final _viewerReports = <String, DateTime>{};
+  bool _fallbackUsed = false;
+  String? _codecOverride;
+  bool? _simulcastOverride;
+  // Anonymous device reports: at most one per outcome and codec per join.
+  String? _joinToken;
+  final _reported = <String>{};
   lk.EventsListener<lk.TrackEvent>? _localVideoListener;
   lk.Track? _watchedLocalVideo;
   AppVideoQualityInfo? _lastQuality;
@@ -213,6 +226,11 @@ class AppEngine {
   /// stepped down for the network or the CPU, or came back up. Resolved from
   /// sender statistics while your camera is on.
   Stream<AppVideoQualityInfo> get onVideoQualityChanged => _videoQuality.stream;
+
+  /// Automatic codec recovery republished your camera on a safer path
+  /// because viewers were receiving it but could not show a picture. See
+  /// [AppVideoCodecFallback]. At most once per join; nothing to do in the app.
+  Stream<AppVideoCodecFallback> get onVideoCodecFallback => _codecFallback.stream;
 
   AppEngine._(this.appId, this.options) : _room = lk.Room(roomOptions: _roomOptions(options));
 
@@ -446,7 +464,9 @@ class AppEngine {
   }
 
   /// The codec this phone publishes with, after [AppVideoCodec.auto] is resolved.
-  String get publishedCodec => options.video.codec == AppVideoCodec.auto && _modeOf(options.video) == AppVideoMode.ultraHd4k && _isIOS
+  String get publishedCodec => _codecOverride ?? _configuredCodec;
+
+  String get _configuredCodec => options.video.codec == AppVideoCodec.auto && _modeOf(options.video) == AppVideoMode.ultraHd4k && _isIOS
       ? 'h265'
       : resolveCodec(options.video.codec);
 
@@ -463,6 +483,10 @@ class AppEngine {
       throw StateError('Already in a channel — call leaveChannel() first');
     }
     _joinStartedAt = DateTime.now();
+    _fallbackUsed = false;
+    _viewerReports.clear();
+    _joinToken = token;
+    _reported.clear();
     await _ensurePlatformInit(this.options.audioScenario);
     if (_isMobile) {
       // Runtime session policy for this engine's scenario.
@@ -750,6 +774,7 @@ class AppEngine {
         final hasVideo = user.hasVideo;
         if (hasVideo && h.fps == 0 && h.hadPicture) h.freezes++;
         if (hasVideo && h.fps > 0) h.hadPicture = true;
+        _checkUndecodable(user, h);
         out.add(AppRemoteStats(
           uid: uid,
           videoFps: h.fps,
@@ -763,6 +788,106 @@ class AppEngine {
       });
       if (out.isNotEmpty) _remoteStats.add(out);
     });
+  }
+
+  /// Reserved data topics: anything starting with `_al.` is SDK-internal and
+  /// never reaches [onMessage] or [onDataReceived].
+  static const _internalTopicPrefix = '_al.';
+  static const _videoReportTopic = '_al.vq';
+
+  /// Viewer side of automatic codec recovery: a subscribed, enabled camera
+  /// whose sender has it on, decoding nothing for more than 6 s. Tell that
+  /// publisher only, at most once per 20 s.
+  void _checkUndecodable(AppRemoteUser user, _RemoteHealth h) {
+    final now = DateTime.now();
+    lk.RemoteTrackPublication? pub;
+    for (final p in user._p.videoTrackPublications) {
+      pub = p;
+      break;
+    }
+    final live = pub != null && pub.subscribed && pub.enabled && !pub.muted;
+    if (!live || h.fps > 0) {
+      h.noFrameSince = null;
+      return;
+    }
+    final since = h.noFrameSince ??= now;
+    if (now.difference(since).inMilliseconds <= 6000) return;
+    final last = h.lastReportAt;
+    if (last != null && now.difference(last).inMilliseconds < 20000) return;
+    h.lastReportAt = now;
+    final body = utf8.encode(jsonEncode({'v': 1, 't': 'no_frames', 'codec': pub.mimeType}));
+    _room.localParticipant
+        ?.publishData(body, reliable: true, topic: _videoReportTopic, destinationIdentities: [user.uid])
+        .catchError((Object _) {});
+  }
+
+  void _reportDevice(String outcome, String codec, {String? fromCodec, String? toCodec}) {
+    if (!_reported.add('$outcome:$codec')) return;
+    _DeviceReports.send(_joinToken, outcome, codec, fromCodec: fromCodec, toCodec: toCodec);
+  }
+
+  /// Publisher side: a viewer reports no picture from our camera.
+  void _onVideoReport(List<int> data, lk.RemoteParticipant? from) {
+    if (from == null) return;
+    dynamic msg;
+    try {
+      msg = jsonDecode(utf8.decode(data));
+    } catch (_) {
+      return;
+    }
+    if (msg is! Map || msg['t'] != 'no_frames') return;
+    final track = localVideoTrack;
+    if (track == null || track.muted) return;
+    final now = DateTime.now();
+    _viewerReports[from.identity] = now;
+    _viewerReports.removeWhere((_, at) => now.difference(at).inMilliseconds > 20000);
+    // Two distinct viewers within 20 s, or the only other person in a 1:1.
+    _reportDevice('viewers_cannot_decode', publishedCodec);
+    if (_viewerReports.length >= 2 || _room.remoteParticipants.length <= 1) {
+      _fallBack(AppVideoCodecFallbackReason.viewersCannotDecode).catchError((Object e) {
+        debugPrint('[AppLoomaRTC] codec recovery failed: $e');
+      });
+    }
+  }
+
+  /// Republish the camera on a safer path: VP8 when it was on anything else,
+  /// otherwise once more as a single layer. At most once per join.
+  Future<void> _fallBack(AppVideoCodecFallbackReason reason) async {
+    if (_fallbackUsed) return;
+    final lp = _room.localParticipant;
+    final old = localVideoTrack;
+    if (lp == null || old is! lk.LocalVideoTrack) return;
+    lk.LocalTrackPublication? pub;
+    for (final p in lp.videoTrackPublications) {
+      if (identical(p.track, old)) pub = p;
+    }
+    if (pub == null) return;
+    _fallbackUsed = true;
+    final from = publishedCodec;
+    String to;
+    if (from != 'vp8') {
+      _codecOverride = 'vp8';
+      to = 'vp8';
+    } else {
+      _simulcastOverride = false;
+      to = 'vp8:single';
+    }
+    debugPrint('[AppLoomaRTC] codec recovery: $from -> $to (${reason.value})');
+    _reportDevice('fallback', from, fromCodec: from, toCodec: 'vp8');
+    final capture = old.currentOptions is lk.CameraCaptureOptions
+        ? old.currentOptions as lk.CameraCaptureOptions
+        : lk.CameraCaptureOptions(params: _preset(_heightOf(options.video)));
+    final publish = _room.roomOptions.defaultVideoPublishOptions.copyWith(
+      videoCodec: publishedCodec,
+      simulcast: _simulcastOverride,
+      backupVideoCodec: publishedCodec == 'vp8' ? const lk.BackupVideoCodec(enabled: false) : null,
+    );
+    await lp.removePublishedTrack(pub.sid);
+    final fresh = await lk.LocalVideoTrack.createCameraTrack(capture);
+    await lp.publishVideoTrack(fresh, publishOptions: publish);
+    _localVideoChanged.add(null);
+    _watchLocalVideo();
+    _codecFallback.add(AppVideoCodecFallback(from: from, to: to, reason: reason));
   }
 
   void _stopStats() {
@@ -845,6 +970,12 @@ class AppEngine {
         _connectionState.add(AppConnectionState.disconnected);
       })
       ..on<lk.DataReceivedEvent>((e) {
+        // SDK-internal traffic never reaches the app.
+        final topic = e.topic;
+        if (topic != null && topic.startsWith(_internalTopicPrefix)) {
+          if (topic == _videoReportTopic) _onVideoReport(e.data, e.participant);
+          return;
+        }
         final from = e.participant is lk.RemoteParticipant
             ? _userFor(e.participant as lk.RemoteParticipant)
             : null;
@@ -903,6 +1034,7 @@ class AppEngine {
     await _firstRemoteVideoFrame.close();
     await _connectionStage.close();
     await _videoQuality.close();
+    await _codecFallback.close();
     await _room.dispose();
   }
 
@@ -912,3 +1044,50 @@ class AppEngine {
 
 /// Typed alias to keep the public API free of dart:typed_data imports for users.
 typedef Uint8Array = Uint8List;
+
+
+/// Anonymous reports of how the video encoder behaved on this phone
+/// (POST /v1/sdk/device-report). Fire-and-forget; every error is swallowed.
+class _DeviceReports {
+  static const _sdkVersion = '0.3.4';
+  static const _apiBase = 'https://api.applooma.dev/v1';
+
+  static String _clean(String? s, int max) {
+    final v = (s ?? '').replaceAll(RegExp(r'[^A-Za-z0-9 ._\-+/(),:#]'), ' ').trim();
+    final t = v.length > max ? v.substring(0, max).trim() : v;
+    return t.isEmpty ? 'unknown' : t;
+  }
+
+  static void send(String? token, String outcome, String codec, {String? fromCodec, String? toCodec}) {
+    if (token == null || token.isEmpty) return;
+    () async {
+      final client = io.HttpClient()..connectionTimeout = const Duration(seconds: 3);
+      try {
+        final android = io.Platform.isAndroid;
+        final report = <String, String>{
+          'sdkPlatform': 'flutter',
+          'sdkVersion': _sdkVersion,
+          'osName': android ? 'Android' : (io.Platform.isIOS ? 'iOS' : _clean(io.Platform.operatingSystem, 32)),
+          'osVersion': _clean(io.Platform.operatingSystemVersion, 32),
+          // The phone's make and model are not readable from Dart alone.
+          'manufacturer': android ? 'unknown' : 'Apple',
+          'model': 'unknown',
+          'codec': codec,
+          'outcome': outcome,
+          if (fromCodec != null) 'fromCodec': fromCodec,
+          if (toCodec != null) 'toCodec': toCodec,
+        };
+        final req = await client.postUrl(Uri.parse('$_apiBase/sdk/device-report')).timeout(const Duration(seconds: 3));
+        req.headers.set('Authorization', 'Bearer $token');
+        req.headers.contentType = io.ContentType.json;
+        req.write(jsonEncode({'reports': [report]}));
+        final res = await req.close().timeout(const Duration(seconds: 3));
+        await res.drain<void>();
+      } catch (_) {
+        // Telemetry never affects a call.
+      } finally {
+        client.close(force: true);
+      }
+    }();
+  }
+}

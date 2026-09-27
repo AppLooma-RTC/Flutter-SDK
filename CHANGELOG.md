@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Automatic codec recovery. Viewer side: a subscribed, enabled remote camera that decodes no picture for more than 6 s while its sender has it on is reported to that publisher only, on a reserved internal data topic. Internal topics (prefix `_al.`) are never delivered to the app's message or data callbacks.
+- Publisher side: reports from 2 different viewers within 20 s (or from the only other person in a 1:1 call) republish the camera on a safer path: VP8 when it was on another codec, otherwise once more as a single layer. At most once per join.
+- New `AppEngine.onVideoCodecFallback` stream of `AppVideoCodecFallback { from, to, reason }` with `AppVideoCodecFallbackReason` (`noFrames`, `encoderError`, `viewersCannotDecode`). `publishedCodec` reflects the switch.
+- Anonymous device reports (OS and SDK version, codec and outcome; no user, identity or IP address) are sent on a codec fallback or a viewer report, so the platform can tune settings per device model. Fire-and-forget; failures are silent.
+
 ## 0.3.4
 
 - `AppVideoMode` on `AppVideoConfig.mode`: `stableHd` (new default), `ultraHd4k` (premium, opt-in), `adaptive` (the previous behaviour). `stableHd` publishes one layer (no simulcast), keeps resolution under pressure and turns adaptive stream off: 1080p30 at 3.5 Mbps on iOS, 720p30 at 1.8 Mbps on Android (Dart cannot check the encoder for hardware).
