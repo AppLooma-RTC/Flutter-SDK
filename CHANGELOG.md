@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.7 — 2026-09-28
 
 - Cloud proxy for restrictive networks: `AppEngineOptions.cloudProxy` (`AppCloudProxy.auto` default, `forceTls443`, `off`). `forceTls443` joins with relay-only transport through AppLooma's relay on TLS 443; `auto` retries a join once that way when the direct join fails with a connection or network timeout, and logs it. New `onProxyStateChanged` stream of `AppProxyStateChange { state, autoRetry }` (`AppProxyState.direct`, `connecting`, `connected`) and `proxyState`.
 - Device tuning: the server's per-device video config (`forceCodec`, `preferCodec`, `maxHeight`, `maxFps`, `maxBitrateKbps`, `disableSimulcast`) is fetched at join (3 s timeout, kept in memory) and applied to the camera's capture and publish options when it is published; it only lowers caps. `denyHardware` is not applied (the encoder cannot be chosen from Dart).
