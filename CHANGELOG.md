@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.6 — 2026-09-27
 
 - Remote diagnostics: the SDK keeps its recent log lines and a stats snapshot every 10 s in memory (no audio, video or messages) and uploads them (gzip), scrubbed of names, metadata, user ids, tokens and URL parameters, after a call with a problem (codec fallback, a viewer reporting no picture, join failure, 3 or more reconnects), when support turned collection on for the device or project, or on the new `AppEngine.uploadDiagnostics(reason)`. Opt out with `AppEngineOptions(remoteDiagnostics: false)`. Kept 14 days.
 - `AppEngineOptions.region` (`AppRegion.auto` default, `bd`, `india` = wire `in`, `sa`, `sg`, `us`). Logged at join and sent with device reports; preparation for multi-region — every region still connects to the `wsUrl` your token endpoint returns.
