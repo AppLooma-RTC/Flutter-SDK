@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Cloud proxy for restrictive networks: `AppEngineOptions.cloudProxy` (`AppCloudProxy.auto` default, `forceTls443`, `off`). `forceTls443` joins with relay-only transport through AppLooma's relay on TLS 443; `auto` retries a join once that way when the direct join fails with a connection or network timeout, and logs it. New `onProxyStateChanged` stream of `AppProxyStateChange { state, autoRetry }` (`AppProxyState.direct`, `connecting`, `connected`) and `proxyState`.
+- Device tuning: the server's per-device video config (`forceCodec`, `preferCodec`, `maxHeight`, `maxFps`, `maxBitrateKbps`, `disableSimulcast`) is fetched at join (3 s timeout, kept in memory) and applied to the camera's capture and publish options when it is published; it only lowers caps. `denyHardware` is not applied (the encoder cannot be chosen from Dart).
+- Still no echo test on Flutter: it needs a microphone recorder plugin the package does not depend on.
+
 ## 0.3.6 — 2026-09-27
 
 - Remote diagnostics: the SDK keeps its recent log lines and a stats snapshot every 10 s in memory (no audio, video or messages) and uploads them (gzip), scrubbed of names, metadata, user ids, tokens and URL parameters, after a call with a problem (codec fallback, a viewer reporting no picture, join failure, 3 or more reconnects), when support turned collection on for the device or project, or on the new `AppEngine.uploadDiagnostics(reason)`. Opt out with `AppEngineOptions(remoteDiagnostics: false)`. Kept 14 days.

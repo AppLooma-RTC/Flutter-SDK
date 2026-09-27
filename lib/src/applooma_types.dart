@@ -180,12 +180,17 @@ class AppEngineOptions {
   /// `false` turns every upload off.
   final bool remoteDiagnostics;
 
+  /// Cloud proxy for networks that block UDP or most ports, default
+  /// [AppCloudProxy.auto]. See `AppEngine.onProxyStateChanged`.
+  final AppCloudProxy cloudProxy;
+
   const AppEngineOptions({
     this.audioScenario = AppAudioScenario.call,
     this.video = const AppVideoConfig(),
     this.audio = const AppAudioOptions(),
     this.region = AppRegion.auto,
     this.remoteDiagnostics = true,
+    this.cloudProxy = AppCloudProxy.auto,
   });
 }
 
@@ -434,4 +439,26 @@ class AppFallbackHysteresis {
     _badSince = null;
     _goodSince = null;
   }
+}
+
+/// Cloud proxy for restrictive networks (office firewalls, UDP blocked).
+/// [auto] connects directly and, when that join fails with a connection or
+/// network timeout, retries once through AppLooma's relay on TLS port 443.
+/// [forceTls443] always relays on TLS 443. [off] never relays.
+enum AppCloudProxy { auto, forceTls443, off }
+
+/// [direct]: media is not relayed (also after leaving). [connecting]: joining
+/// through the relay on TLS 443. [connected]: in the channel through the relay.
+enum AppProxyState { direct, connecting, connected }
+
+/// Delivered on `AppEngine.onProxyStateChanged`. [autoRetry] is true when the
+/// relay is used because the direct join failed.
+class AppProxyStateChange {
+  final AppProxyState state;
+  final bool autoRetry;
+
+  const AppProxyStateChange({required this.state, required this.autoRetry});
+
+  @override
+  String toString() => 'AppProxyStateChange(${state.name}${autoRetry ? ', auto retry' : ''})';
 }

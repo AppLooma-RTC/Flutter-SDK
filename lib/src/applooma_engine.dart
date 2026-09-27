@@ -197,6 +197,7 @@ class AppEngine {
   bool _cameraMutedByFallback = false;
   // Token renewal.
   final _tokenWillExpire = StreamController<String>.broadcast();
+  final _proxyStateCtl = StreamController<AppProxyStateChange>.broadcast();
   Timer? _tokenTimer;
   // Network test.
   lk.Room? _testRoom;
@@ -260,6 +261,9 @@ class AppEngine {
   /// left at join). Fetch a new one from your server and pass it to
   /// [renewToken]. Carries the token that is about to expire.
   Stream<String> get onTokenWillExpire => _tokenWillExpire.stream;
+
+  /// The cloud proxy state changed; see [AppEngineOptions.cloudProxy].
+  Stream<AppProxyStateChange> get onProxyStateChanged => _proxyStateCtl.stream;
 
   AppEngine._(this.appId, this.options) : _room = lk.Room(roomOptions: _roomOptions(options));
 
@@ -493,7 +497,7 @@ class AppEngine {
   }
 
   /// The codec this phone publishes with, after [AppVideoCodec.auto] is resolved.
-  String get publishedCodec => _codecOverride ?? _configuredCodec;
+  String get publishedCodec => _codecOverride ?? _DeviceVideoConfig.codec(options.video.codec, _configuredCodec, _deviceVideo);
 
   String get _configuredCodec => options.video.codec == AppVideoCodec.auto && _modeOf(options.video) == AppVideoMode.ultraHd4k && _isIOS
       ? 'h265'
@@ -519,6 +523,9 @@ class AppEngine {
     _armTokenTimer();
     _diag.enabled = this.options.remoteDiagnostics;
     _diag.begin(token);
+    // Device tuning: fetched in the background (3 s timeout) and read when
+    // the camera is published, so a join never waits for it.
+    _deviceFetch = _fetchDeviceConfig(token);
     _diagLog('join: region=${this.options.region.value} codec=$publishedCodec role=${options.role.name} camera=${options.camera} mic=${options.microphone}');
     await _ensurePlatformInit(this.options.audioScenario);
     if (_isMobile) {
@@ -533,7 +540,7 @@ class AppEngine {
     // Auto-subscribe so an audience member (and every co-host) receives all
     // published tracks the moment they join.
     try {
-      await _room.connect(wsUrl, token, connectOptions: const lk.ConnectOptions(autoSubscribe: true));
+      await _connectWithProxy(wsUrl, token);
     } catch (e) {
       _diag.log('join failed: ${e.runtimeType}: $e');
       _diag.problem('join_failed');
@@ -555,7 +562,10 @@ class AppEngine {
         await _room.localParticipant?.setMicrophoneEnabled(true);
       }
       if (options.camera) {
-        await _room.localParticipant?.setCameraEnabled(true);
+        try {
+          await _deviceFetch?.timeout(const Duration(seconds: 1));
+        } catch (_) {}
+        await _publishCamera();
       }
     }
   }
@@ -569,11 +579,161 @@ class AppEngine {
     await _room.disconnect();
     _joined = false;
     _users.clear();
+    _setProxyState(AppProxyState.direct, false);
+  }
+
+  // ---- Cloud proxy ----
+
+  AppProxyState _proxy = AppProxyState.direct;
+
+  /// Current cloud proxy state; see [AppEngineOptions.cloudProxy].
+  AppProxyState get proxyState => _proxy;
+
+  void _setProxyState(AppProxyState state, bool autoRetry) {
+    if (state == _proxy) return;
+    _proxy = state;
+    _diagLog('cloud proxy ${state.name}${autoRetry ? ' (auto retry)' : ''}');
+    if (!_proxyStateCtl.isClosed) _proxyStateCtl.add(AppProxyStateChange(state: state, autoRetry: autoRetry));
+  }
+
+  /// Whether a failed direct join is worth one retry through the relay: a
+  /// connection or network timeout, not a refused token.
+  @visibleForTesting
+  static bool isProxyRetryable(Object e) {
+    final text = '${e.runtimeType} $e';
+    if (RegExp(r'401|403|unauthori[sz]ed|forbidden|permission|invalid token|token is expired|not allowed|already', caseSensitive: false).hasMatch(text)) {
+      return false;
+    }
+    return RegExp(r'time[d ]?out|network|transport|\bice\b|connection|connect|unreachable|socket|peer', caseSensitive: false).hasMatch(text);
+  }
+
+  Future<void> _connectWithProxy(String wsUrl, String token) async {
+    final mode = options.cloudProxy;
+    // Relay-only: media goes through the relay the server hands out (TLS on 443).
+    const relay = lk.ConnectOptions(
+      autoSubscribe: true,
+      rtcConfiguration: lk.RTCConfiguration(iceTransportPolicy: lk.RTCIceTransportPolicy.relay),
+    );
+    if (mode == AppCloudProxy.forceTls443) {
+      _setProxyState(AppProxyState.connecting, false);
+      try {
+        await _room.connect(wsUrl, token, connectOptions: relay);
+      } catch (_) {
+        _setProxyState(AppProxyState.direct, false);
+        rethrow;
+      }
+      _setProxyState(AppProxyState.connected, false);
+      return;
+    }
+    try {
+      await _room.connect(wsUrl, token, connectOptions: const lk.ConnectOptions(autoSubscribe: true));
+    } catch (e) {
+      if (mode != AppCloudProxy.auto || !isProxyRetryable(e)) rethrow;
+      _diagLog('direct join failed ($e); retrying once through the cloud proxy on TLS 443');
+      debugPrint('[AppLoomaRTC] Direct connection failed; retrying through the AppLooma cloud proxy (TLS 443)');
+      try {
+        await _room.disconnect();
+      } catch (_) {}
+      _setProxyState(AppProxyState.connecting, true);
+      try {
+        await _room.connect(wsUrl, token, connectOptions: relay);
+      } catch (_) {
+        _setProxyState(AppProxyState.direct, true);
+        rethrow;
+      }
+      _setProxyState(AppProxyState.connected, true);
+    }
+  }
+
+  // ---- Device tuning ----
+
+  /// Last good answer of GET /v1/sdk/device-config, process-wide and kept in
+  /// memory only (no storage plugin), so the first join after a cold start
+  /// uses it only once the fetch has returned.
+  static _DeviceVideoConfig? _deviceVideo;
+  static DateTime? _deviceVideoAt;
+  Future<void>? _deviceFetch;
+
+  Future<void> _fetchDeviceConfig(String token) async {
+    final at = _deviceVideoAt;
+    final cached = _deviceVideo;
+    if (at != null && cached != null && DateTime.now().difference(at).inSeconds < cached.ttlSeconds) return;
+    final client = io.HttpClient()..connectionTimeout = const Duration(seconds: 3);
+    try {
+      final q = 'platform=flutter&sdkVersion=${Uri.encodeQueryComponent(_DeviceReports._sdkVersion)}'
+          '&osVersion=${Uri.encodeQueryComponent(_DeviceReports._clean(io.Platform.operatingSystemVersion, 32))}'
+          '&region=${Uri.encodeQueryComponent(options.region.value)}';
+      final req = await client.getUrl(Uri.parse('${_DeviceReports._apiBase}/sdk/device-config?$q')).timeout(const Duration(seconds: 3));
+      req.headers.set('Authorization', 'Bearer $token');
+      req.headers.set('Accept', 'application/json');
+      final res = await req.close().timeout(const Duration(seconds: 3));
+      final text = await res.transform(utf8.decoder).join().timeout(const Duration(seconds: 3));
+      if (res.statusCode != 200) return;
+      final cfg = _DeviceVideoConfig.parse(jsonDecode(text));
+      if (cfg == null) return;
+      _deviceVideo = cfg;
+      _deviceVideoAt = DateTime.now();
+      _diagLog('device tuning: $cfg');
+    } catch (_) {
+      // keep the last good answer
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// Publishes the camera with the device tuning applied. Room options are
+  /// fixed when the engine is created, so the caps go into this publish's
+  /// capture and publish options instead. An existing (muted) camera is
+  /// simply turned back on.
+  Future<void> _publishCamera() async {
+    final lp = _room.localParticipant;
+    if (lp == null) return;
+    final cfg = _deviceVideo;
+    if (cfg == null || cfg.isEmpty || lp.getTrackPublicationBySource(lk.TrackSource.camera) != null) {
+      await lp.setCameraEnabled(true);
+      _localVideoChanged.add(null);
+      return;
+    }
+    final base = _room.roomOptions.defaultVideoPublishOptions;
+    final baseEnc = base.videoEncoding;
+    var height = _heightOf(options.video);
+    if (cfg.maxHeight > 0 && height > cfg.maxHeight) {
+      height = [2160, 1440, 1080, 720, 540, 360].firstWhere((h) => h <= cfg.maxHeight, orElse: () => 360);
+    }
+    final preset = _preset(height);
+    final fps0 = baseEnc?.maxFramerate ?? options.video.fps;
+    final fps = cfg.maxFps > 0 && fps0 > cfg.maxFps ? cfg.maxFps : fps0;
+    final br0 = baseEnc?.maxBitrate ?? preset.encoding?.maxBitrate ?? 0;
+    final capBps = cfg.maxBitrateKbps * 1000;
+    final bitrate = capBps > 0 && (br0 == 0 || br0 > capBps) ? capBps : br0;
+    final codec = publishedCodec;
+    final simulcast = (_simulcastOverride ?? base.simulcast) && !cfg.disableSimulcast;
+    final publish = base.copyWith(
+      videoCodec: codec,
+      videoEncoding: lk.VideoEncoding(maxBitrate: bitrate, maxFramerate: fps),
+      simulcast: simulcast,
+      backupVideoCodec: codec == 'vp8'
+          ? const lk.BackupVideoCodec(enabled: false)
+          : lk.BackupVideoCodec(enabled: true, codec: 'vp8', simulcast: simulcast),
+    );
+    final capture = lk.CameraCaptureOptions(
+      cameraPosition: _backCamera ? lk.CameraPosition.back : lk.CameraPosition.front,
+      params: preset,
+      maxFrameRate: fps.toDouble(),
+    );
+    _diagLog('camera publish with device tuning: ${height}p ${fps}fps ${bitrate ~/ 1000}kbps codec=$codec simulcast=$simulcast');
+    final track = await lk.LocalVideoTrack.createCameraTrack(capture);
+    await lp.publishVideoTrack(track, publishOptions: publish);
+    _localVideoChanged.add(null);
   }
 
   // ---- Local media controls ----
   Future<void> enableCamera([bool on = true]) async {
-    await _room.localParticipant?.setCameraEnabled(on);
+    if (on) {
+      await _publishCamera();
+    } else {
+      await _room.localParticipant?.setCameraEnabled(false);
+    }
     _localVideoChanged.add(null);
   }
 
@@ -1481,6 +1641,7 @@ class AppEngine {
     await _codecFallback.close();
     await _fallbackState.close();
     await _tokenWillExpire.close();
+    await _proxyStateCtl.close();
     await _room.dispose();
   }
 
@@ -1538,4 +1699,77 @@ class _DeviceReports {
       }
     }();
   }
+}
+
+
+/// Per-device video overrides from GET /v1/sdk/device-config (the same
+/// fields the other SDKs read). Every field is optional. `denyHardware` is
+/// not applied: Dart cannot choose the phone's encoder.
+class _DeviceVideoConfig {
+  final String? forceCodec;
+  final String? preferCodec;
+  final int maxHeight;
+  final int maxFps;
+  final int maxBitrateKbps;
+  final bool disableSimulcast;
+  final int ttlSeconds;
+
+  const _DeviceVideoConfig({
+    this.forceCodec,
+    this.preferCodec,
+    this.maxHeight = 0,
+    this.maxFps = 0,
+    this.maxBitrateKbps = 0,
+    this.disableSimulcast = false,
+    this.ttlSeconds = 3600,
+  });
+
+  bool get isEmpty =>
+      forceCodec == null && preferCodec == null && maxHeight == 0 && maxFps == 0 && maxBitrateKbps == 0 && !disableSimulcast;
+
+  static const _codecs = {'vp8', 'h264', 'h265'};
+
+  static _DeviceVideoConfig? parse(Object? root) {
+    if (root is! Map) return null;
+    final ttlRaw = root['ttlSeconds'];
+    final ttl = ttlRaw is num && ttlRaw > 0 ? ttlRaw.toInt() : 3600;
+    final v = root['video'];
+    if (v is! Map) return _DeviceVideoConfig(ttlSeconds: ttl);
+    String? codec(String key) {
+      final c = v[key];
+      if (c is! String) return null;
+      final l = c.toLowerCase();
+      if (!_codecs.contains(l)) return null;
+      // H.265 is published on iOS only (see resolveCodec).
+      if (l == 'h265' && !io.Platform.isIOS) return null;
+      return l;
+    }
+
+    int positive(String key) {
+      final n = v[key];
+      return n is num && n > 0 ? n.toInt() : 0;
+    }
+
+    return _DeviceVideoConfig(
+      forceCodec: codec('forceCodec'),
+      preferCodec: codec('preferCodec'),
+      maxHeight: positive('maxHeight'),
+      maxFps: positive('maxFps'),
+      maxBitrateKbps: positive('maxBitrateKbps'),
+      disableSimulcast: v['disableSimulcast'] == true,
+      ttlSeconds: ttl,
+    );
+  }
+
+  /// forceCodec always wins; preferCodec only replaces the auto choice.
+  static String codec(AppVideoCodec app, String resolved, _DeviceVideoConfig? cfg) {
+    if (cfg == null) return resolved;
+    if (cfg.forceCodec != null) return cfg.forceCodec!;
+    if (app == AppVideoCodec.auto && cfg.preferCodec != null) return cfg.preferCodec!;
+    return resolved;
+  }
+
+  @override
+  String toString() =>
+      'force=$forceCodec prefer=$preferCodec maxHeight=$maxHeight maxFps=$maxFps maxKbps=$maxBitrateKbps noSimulcast=$disableSimulcast';
 }
