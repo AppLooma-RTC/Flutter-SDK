@@ -172,11 +172,20 @@ class AppEngineOptions {
   /// Preferred server region; see [AppRegion].
   final AppRegion region;
 
+  /// Remote diagnostics, default true. The SDK keeps its own recent log lines
+  /// and a stats snapshot every 10 s in memory (never audio, video, messages
+  /// or names) and uploads them, scrubbed, after a call that had a problem,
+  /// when AppLooma support switched collection on for this device or
+  /// project, or when you call [AppEngine.uploadDiagnostics]. Kept 14 days.
+  /// `false` turns every upload off.
+  final bool remoteDiagnostics;
+
   const AppEngineOptions({
     this.audioScenario = AppAudioScenario.call,
     this.video = const AppVideoConfig(),
     this.audio = const AppAudioOptions(),
     this.region = AppRegion.auto,
+    this.remoteDiagnostics = true,
   });
 }
 

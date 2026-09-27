@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Remote diagnostics: the SDK keeps its recent log lines and a stats snapshot every 10 s in memory (no audio, video or messages) and uploads them (gzip), scrubbed of names, metadata, user ids, tokens and URL parameters, after a call with a problem (codec fallback, a viewer reporting no picture, join failure, 3 or more reconnects), when support turned collection on for the device or project, or on the new `AppEngine.uploadDiagnostics(reason)`. Opt out with `AppEngineOptions(remoteDiagnostics: false)`. Kept 14 days.
 - `AppEngineOptions.region` (`AppRegion.auto` default, `bd`, `india` = wire `in`, `sa`, `sg`, `us`). Logged at join and sent with device reports; preparation for multi-region — every region still connects to the `wsUrl` your token endpoint returns.
 - `startNetworkTest(serverUrl, token, callback)` / `stopNetworkTest()`: a ~5 s separate test connection (10 s timeout) reporting `AppNetworkTestResult { uplinkQuality, downlinkQuality, rttMs, jitterMs, uplinkLoss, downlinkLoss, error }` with `AppNetworkQuality`. Nothing is published, so both qualities come from the server's grade of the test connection. No echo test on Flutter yet.
 - `setRemoteSubscribeFallback` / `setLocalPublishFallback` with `AppFallbackOption { none, videoLowQuality, audioOnly }` and the `onFallbackStateChanged` stream of `AppFallbackState { isLocal, state }`. Poor/lost for 4 s falls back, good for 10 s restores (`AppFallbackHysteresis`).

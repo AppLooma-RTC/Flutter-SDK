@@ -5,6 +5,7 @@ import 'dart:io' as io;
 import 'package:applooma_rtc_core/applooma_rtc_core.dart' as lk;
 import 'package:flutter/foundation.dart';
 
+import 'applooma_diag.dart';
 import 'applooma_types.dart';
 
 /// Our own frames travel on the same channel as customer data, tagged so the
@@ -516,7 +517,9 @@ class AppEngine {
     _joinToken = token;
     _reported.clear();
     _armTokenTimer();
-    debugPrint('[AppLoomaRTC] join: region=${this.options.region.value} codec=$publishedCodec');
+    _diag.enabled = this.options.remoteDiagnostics;
+    _diag.begin(token);
+    _diagLog('join: region=${this.options.region.value} codec=$publishedCodec role=${options.role.name} camera=${options.camera} mic=${options.microphone}');
     await _ensurePlatformInit(this.options.audioScenario);
     if (_isMobile) {
       // Runtime session policy for this engine's scenario.
@@ -529,8 +532,16 @@ class AppEngine {
     _wireEvents();
     // Auto-subscribe so an audience member (and every co-host) receives all
     // published tracks the moment they join.
-    await _room.connect(wsUrl, token, connectOptions: const lk.ConnectOptions(autoSubscribe: true));
+    try {
+      await _room.connect(wsUrl, token, connectOptions: const lk.ConnectOptions(autoSubscribe: true));
+    } catch (e) {
+      _diag.log('join failed: ${e.runtimeType}: $e');
+      _diag.problem('join_failed');
+      _diag.end('join failed');
+      rethrow;
+    }
     _joined = true;
+    _diag.log('connected in ${_elapsed()} ms');
     _connectionStage.add((AppConnectionStage.connected, null, _elapsed()));
 
     // Participants already in the room when we join never produce a
@@ -550,6 +561,7 @@ class AppEngine {
   }
 
   Future<void> leaveChannel() async {
+    _diag.end('leave');
     _tokenTimer?.cancel();
     _tokenTimer = null;
     _resetFallbackState();
@@ -821,7 +833,44 @@ class AppEngine {
         ));
       });
       if (out.isNotEmpty) _remoteStats.add(out);
+      final now = DateTime.now().millisecondsSinceEpoch;
+      if (now - _lastDiagStatsAt >= 10000) {
+        _lastDiagStatsAt = now;
+        var minFps = -1;
+        var freezes = 0;
+        for (final s in out) {
+          if (minFps < 0 || s.videoFps < minFps) minFps = s.videoFps.round();
+          freezes += s.videoFreezeCount;
+        }
+        _diag.log('stats codec=$publishedCodec camera=${localVideoTrack != null} remotes=${out.length} minRemoteFps=$minFps freezes=$freezes');
+      }
     });
+  }
+
+  /// Remote diagnostics ring and uploader (see [uploadDiagnostics]).
+  late final DiagCollector _diag = DiagCollector(
+    sdkVersion: _DeviceReports._sdkVersion,
+    apiBase: _DeviceReports._apiBase,
+    region: () => options.region.value,
+  );
+  int _lastDiagStatsAt = 0;
+
+  /// SDK log line: kept in the diagnostics ring, and printed in debug builds.
+  void _diagLog(String line) {
+    _diag.log(line);
+    debugPrint('[AppLoomaRTC] $line');
+  }
+
+  /// Upload this device's recent SDK log lines to AppLooma support now (or
+  /// with the next join when not in a channel), for example from a "report a
+  /// problem" button. [reason] is a short label you choose. Only SDK-produced
+  /// lines are sent, scrubbed of names, metadata, tokens and URL parameters;
+  /// never audio, video or messages. Does nothing when
+  /// [AppEngineOptions.remoteDiagnostics] is false.
+  void uploadDiagnostics(String reason) {
+    try {
+      _diag.request(reason);
+    } catch (_) {}
   }
 
   /// Reserved data topics: anything starting with `_al.` is SDK-internal and
@@ -878,9 +927,11 @@ class AppEngine {
     _viewerReports.removeWhere((_, at) => now.difference(at).inMilliseconds > 20000);
     // Two distinct viewers within 20 s, or the only other person in a 1:1.
     _reportDevice('viewers_cannot_decode', publishedCodec);
+    _diag.log('viewer uid=${from.identity} reports no picture codec=$publishedCodec');
+    _diag.problem('no_frames');
     if (_viewerReports.length >= 2 || _room.remoteParticipants.length <= 1) {
       _fallBack(AppVideoCodecFallbackReason.viewersCannotDecode).catchError((Object e) {
-        debugPrint('[AppLoomaRTC] codec recovery failed: $e');
+        _diagLog('codec recovery failed: ${e.runtimeType}');
       });
     }
   }
@@ -907,7 +958,8 @@ class AppEngine {
       _simulcastOverride = false;
       to = 'vp8:single';
     }
-    debugPrint('[AppLoomaRTC] codec recovery: $from -> $to (${reason.value})');
+    _diagLog('codec recovery: $from -> $to (${reason.value})');
+    _diag.problem('fallback');
     _reportDevice('fallback', from, fromCodec: from, toCodec: 'vp8');
     final capture = old.currentOptions is lk.CameraCaptureOptions
         ? old.currentOptions as lk.CameraCaptureOptions
@@ -957,9 +1009,12 @@ class AppEngine {
         _connectionState.add(AppConnectionState.connected);
       })
       ..on<lk.RoomReconnectingEvent>((_) {
+        _diag.log('reconnecting');
+        _diag.reconnecting();
         _connectionState.add(AppConnectionState.reconnecting);
       })
       ..on<lk.RoomReconnectedEvent>((_) {
+        _diag.log('reconnected');
         // Track state can change while disconnected, so rebuild the roster.
         for (final uid in _health.keys.toList()) {
           _unwatch(uid);
@@ -993,7 +1048,9 @@ class AppEngine {
       ..on<lk.TrackUnmutedEvent>((e) {
         if (e.participant is lk.LocalParticipant) _localVideoChanged.add(null);
       })
-      ..on<lk.RoomDisconnectedEvent>((_) {
+      ..on<lk.RoomDisconnectedEvent>((e) {
+        _diag.log('disconnected reason=${e.reason?.name}');
+        _diag.end('disconnected');
         _joined = false;
         _tokenTimer?.cancel();
         _resetFallbackState();
@@ -1091,6 +1148,8 @@ class AppEngine {
   void renewToken(String token) {
     if (token.isEmpty) return;
     _joinToken = token;
+    _diag.updateToken(token);
+    _diag.log('join token renewed');
     if (_joined) _armTokenTimer();
   }
 
