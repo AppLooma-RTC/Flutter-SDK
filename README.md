@@ -9,7 +9,7 @@ Full documentation: **https://docs.applooma.dev/sdk/flutter**
 
 ```yaml
 dependencies:
-  applooma_rtc: ^0.1.0
+  applooma_rtc: ^0.3.3
 ```
 
 ### Permissions
@@ -22,6 +22,10 @@ dependencies:
 <uses-permission android:name="android.permission.INTERNET" />
 ```
 
+On Android 12 and above add `android.permission.BLUETOOTH_CONNECT` too and request
+it next to the microphone, or audio never reaches a Bluetooth headset (a refusal is
+harmless).
+
 Declaring them is not enough on Android 6 and later; request them at runtime
 before joining.
 
@@ -33,6 +37,9 @@ before joining.
 <key>NSMicrophoneUsageDescription</key>
 <string>Used for voice and video calls</string>
 ```
+
+Enable the **Audio, AirPlay, and Picture in Picture** background mode to keep a call
+running while the app is in the background.
 
 Without these the app terminates the first time it opens a device.
 
@@ -79,6 +86,20 @@ await engine.enableScreenShare(true);
 await engine.sendData(utf8.encode('hello'));
 await engine.leaveChannel();
 await engine.dispose();   // release the engine when the screen is gone
+```
+
+Video quality — 1080p at 4 Mbps by default (720p at 2.2 Mbps, 1440p preset at
+5 Mbps). Choose what the encoder gives up first with `degradation`, cap it with
+`maxBitrate`, and listen to `engine.onVideoQualityChanged`:
+
+```dart
+final engine = AppEngine.create(
+  appId: 'YOUR_APP_ID',
+  options: const AppEngineOptions(
+    video: AppVideoConfig(height: 1080, fps: 30, maxBitrate: 4000000,
+        degradation: AppVideoDegradation.keepResolution),
+  ),
+);
 ```
 
 A complete app is in [`example/`](example).
