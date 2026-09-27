@@ -182,6 +182,25 @@ class AppEngine {
   lk.EventsListener<lk.TrackEvent>? _localVideoListener;
   lk.Track? _watchedLocalVideo;
   AppVideoQualityInfo? _lastQuality;
+  // Network fallback (downlink = remote video, uplink = own camera).
+  final _fallbackState = StreamController<AppFallbackState>.broadcast();
+  AppFallbackOption _remoteFallback = AppFallbackOption.none;
+  AppFallbackOption _localFallback = AppFallbackOption.none;
+  final _downlinkHysteresis = AppFallbackHysteresis();
+  final _uplinkHysteresis = AppFallbackHysteresis();
+  AppFallbackOption _remoteInEffect = AppFallbackOption.none;
+  AppFallbackOption _localInEffect = AppFallbackOption.none;
+  final _lowered = <lk.RemoteTrackPublication>{};
+  final _disabledByFallback = <lk.RemoteTrackPublication>{};
+  final _savedBitrates = <int?>[];
+  bool _cameraMutedByFallback = false;
+  // Token renewal.
+  final _tokenWillExpire = StreamController<String>.broadcast();
+  Timer? _tokenTimer;
+  // Network test.
+  lk.Room? _testRoom;
+  Timer? _testTimer;
+  void Function(AppNetworkTestResult)? _testCallback;
 
   Stream<AppRemoteUser> get onUserJoined => _userJoined.stream;
   Stream<AppRemoteUser> get onUserLeft => _userLeft.stream;
@@ -231,6 +250,15 @@ class AppEngine {
   /// because viewers were receiving it but could not show a picture. See
   /// [AppVideoCodecFallback]. At most once per join; nothing to do in the app.
   Stream<AppVideoCodecFallback> get onVideoCodecFallback => _codecFallback.stream;
+
+  /// A network fallback set with [setRemoteSubscribeFallback] or
+  /// [setLocalPublishFallback] took effect or was lifted.
+  Stream<AppFallbackState> get onFallbackStateChanged => _fallbackState.stream;
+
+  /// The join token expires in about 30 s (or already had less than that
+  /// left at join). Fetch a new one from your server and pass it to
+  /// [renewToken]. Carries the token that is about to expire.
+  Stream<String> get onTokenWillExpire => _tokenWillExpire.stream;
 
   AppEngine._(this.appId, this.options) : _room = lk.Room(roomOptions: _roomOptions(options));
 
@@ -487,6 +515,8 @@ class AppEngine {
     _viewerReports.clear();
     _joinToken = token;
     _reported.clear();
+    _armTokenTimer();
+    debugPrint('[AppLoomaRTC] join: region=${this.options.region.value} codec=$publishedCodec');
     await _ensurePlatformInit(this.options.audioScenario);
     if (_isMobile) {
       // Runtime session policy for this engine's scenario.
@@ -520,6 +550,9 @@ class AppEngine {
   }
 
   Future<void> leaveChannel() async {
+    _tokenTimer?.cancel();
+    _tokenTimer = null;
+    _resetFallbackState();
     _stopStats();
     await _room.disconnect();
     _joined = false;
@@ -766,6 +799,7 @@ class AppEngine {
       // The local camera may have been swapped by a path that raised no
       // event; the tick keeps the quality watcher on the live track.
       _watchLocalVideo();
+      _tickFallback();
       final out = <AppRemoteStats>[];
       _health.forEach((uid, h) {
         final user = _users[uid];
@@ -823,7 +857,8 @@ class AppEngine {
 
   void _reportDevice(String outcome, String codec, {String? fromCodec, String? toCodec}) {
     if (!_reported.add('$outcome:$codec')) return;
-    _DeviceReports.send(_joinToken, outcome, codec, fromCodec: fromCodec, toCodec: toCodec);
+    _DeviceReports.send(_joinToken, outcome, codec,
+        fromCodec: fromCodec, toCodec: toCodec, region: options.region.value);
   }
 
   /// Publisher side: a viewer reports no picture from our camera.
@@ -960,6 +995,8 @@ class AppEngine {
       })
       ..on<lk.RoomDisconnectedEvent>((_) {
         _joined = false;
+        _tokenTimer?.cancel();
+        _resetFallbackState();
         _stopStats();
         // Report everyone as gone; a stale roster after a disconnect made
         // remoteUsers wrong until the next join.
@@ -1015,8 +1052,356 @@ class AppEngine {
       });
   }
 
+  // ---- Token renewal ----
+
+  /// The `exp` claim (seconds since epoch) of a join token, or null.
+  static int? tokenExpiry(String token) {
+    final parts = token.split('.');
+    if (parts.length < 2) return null;
+    try {
+      final payload = jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))));
+      final exp = payload is Map ? payload['exp'] : null;
+      return exp is num ? exp.toInt() : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _armTokenTimer() {
+    _tokenTimer?.cancel();
+    _tokenTimer = null;
+    final token = _joinToken;
+    if (token == null) return;
+    final exp = tokenExpiry(token);
+    if (exp == null) return;
+    final fireAt = DateTime.fromMillisecondsSinceEpoch(exp * 1000).subtract(const Duration(seconds: 30));
+    var wait = fireAt.difference(DateTime.now());
+    if (wait.isNegative) wait = Duration.zero;
+    _tokenTimer = Timer(wait, () {
+      if (!_tokenWillExpire.isClosed) _tokenWillExpire.add(token);
+    });
+  }
+
+  /// Replace the join token the SDK keeps and re-arm [onTokenWillExpire].
+  ///
+  /// While connected, the media server already refreshes the live
+  /// connection's own credential; the renewed token is what the SDK uses for
+  /// its own later calls (reports). When not joined it is stored only — the
+  /// next [joinChannel] takes its own token.
+  void renewToken(String token) {
+    if (token.isEmpty) return;
+    _joinToken = token;
+    if (_joined) _armTokenTimer();
+  }
+
+  // ---- Network fallback ----
+
+  /// What to give up for remote video when YOUR downlink is weak: poor or
+  /// lost connection quality for 4 s falls back, good or excellent for 10 s
+  /// restores.
+  ///
+  /// [AppFallbackOption.videoLowQuality] asks for the low layer of every
+  /// remote camera (best effort: only publishers sending several layers have
+  /// one, and in [AppVideoMode.adaptive] a smaller view size still wins).
+  /// [AppFallbackOption.audioOnly] stops receiving remote video until the
+  /// network recovers; cameras you turned off yourself stay off.
+  void setRemoteSubscribeFallback(AppFallbackOption option) {
+    _remoteFallback = option;
+    if (_remoteInEffect != AppFallbackOption.none && _remoteInEffect != option) {
+      _restoreRemote();
+      _downlinkHysteresis.reset();
+    }
+  }
+
+  /// What to give up for your own camera when YOUR uplink is weak (same
+  /// timing as [setRemoteSubscribeFallback]).
+  ///
+  /// [AppFallbackOption.videoLowQuality] lowers the camera's bitrate cap to
+  /// 30 % (at least 300 kbps). [AppFallbackOption.audioOnly] pauses the
+  /// camera (it stays published) and resumes it on recovery.
+  void setLocalPublishFallback(AppFallbackOption option) {
+    _localFallback = option;
+    if (_localInEffect != AppFallbackOption.none && _localInEffect != option) {
+      _restoreLocal();
+      _uplinkHysteresis.reset();
+    }
+  }
+
+  void _tickFallback() {
+    final q = _room.localParticipant?.connectionQuality ?? lk.ConnectionQuality.unknown;
+    final bad = q == lk.ConnectionQuality.poor || q == lk.ConnectionQuality.lost;
+    final good = q == lk.ConnectionQuality.good || q == lk.ConnectionQuality.excellent;
+    final now = DateTime.now();
+    if (_remoteFallback != AppFallbackOption.none) {
+      final fallen = _downlinkHysteresis.update(bad: bad, good: good, now: now);
+      if (fallen && _remoteInEffect == AppFallbackOption.none) {
+        _applyRemote(_remoteFallback);
+      } else if (!fallen && _remoteInEffect != AppFallbackOption.none) {
+        _restoreRemote();
+      } else if (fallen) {
+        _applyRemote(_remoteInEffect, announce: false); // cameras subscribed since
+      }
+    }
+    if (_localFallback != AppFallbackOption.none) {
+      final fallen = _uplinkHysteresis.update(bad: bad, good: good, now: now);
+      if (fallen && _localInEffect == AppFallbackOption.none) {
+        _applyLocal(_localFallback);
+      } else if (!fallen && _localInEffect != AppFallbackOption.none) {
+        _restoreLocal();
+      }
+    }
+  }
+
+  void _applyRemote(AppFallbackOption option, {bool announce = true}) {
+    for (final p in _room.remoteParticipants.values) {
+      for (final pub in p.videoTrackPublications) {
+        if (!pub.subscribed) continue;
+        if (option == AppFallbackOption.videoLowQuality) {
+          if (_lowered.add(pub)) pub.setVideoQuality(lk.VideoQuality.LOW).catchError((Object _) {});
+        } else if (option == AppFallbackOption.audioOnly) {
+          // Only cameras that are on; one the app disabled stays the app's.
+          if (pub.enabled && _disabledByFallback.add(pub)) pub.disable().catchError((Object _) {});
+        }
+      }
+    }
+    if (announce) {
+      _remoteInEffect = option;
+      _fallbackState.add(AppFallbackState(isLocal: false, state: option));
+    }
+  }
+
+  void _restoreRemote() {
+    for (final pub in _lowered) {
+      pub.setVideoQuality(lk.VideoQuality.HIGH).catchError((Object _) {});
+    }
+    for (final pub in _disabledByFallback) {
+      pub.enable().catchError((Object _) {});
+    }
+    _lowered.clear();
+    _disabledByFallback.clear();
+    if (_remoteInEffect != AppFallbackOption.none) {
+      _remoteInEffect = AppFallbackOption.none;
+      if (!_fallbackState.isClosed) {
+        _fallbackState.add(const AppFallbackState(isLocal: false, state: AppFallbackOption.none));
+      }
+    }
+  }
+
+  void _applyLocal(AppFallbackOption option) {
+    final track = localVideoTrack;
+    if (track is! lk.LocalVideoTrack) return;
+    if (option == AppFallbackOption.videoLowQuality) {
+      final sender = track.sender;
+      if (sender == null) return;
+      final params = sender.parameters;
+      final encodings = params.encodings ?? [];
+      _savedBitrates
+        ..clear()
+        ..addAll(encodings.map((e) => e.maxBitrate));
+      for (final e in encodings) {
+        final cap = e.maxBitrate;
+        if (cap != null && cap > 0) {
+          final lowered = (cap * 0.3).round();
+          e.maxBitrate = lowered >= 300000 ? lowered : (cap < 300000 ? cap : 300000);
+        }
+      }
+      params.encodings = encodings;
+      sender.setParameters(params).catchError((Object _) => false);
+    } else if (option == AppFallbackOption.audioOnly) {
+      if (track.muted) return;
+      _cameraMutedByFallback = true;
+      track.mute(stopOnMute: false).catchError((Object _) => false);
+    }
+    _localInEffect = option;
+    _fallbackState.add(AppFallbackState(isLocal: true, state: option));
+  }
+
+  void _restoreLocal() {
+    final track = localVideoTrack;
+    if (_localInEffect == AppFallbackOption.videoLowQuality && track is lk.LocalVideoTrack) {
+      final sender = track.sender;
+      if (sender != null && _savedBitrates.isNotEmpty) {
+        final params = sender.parameters;
+        final encodings = params.encodings ?? [];
+        for (var i = 0; i < encodings.length && i < _savedBitrates.length; i++) {
+          encodings[i].maxBitrate = _savedBitrates[i];
+        }
+        params.encodings = encodings;
+        sender.setParameters(params).catchError((Object _) => false);
+      }
+    }
+    if (_cameraMutedByFallback && track is lk.LocalVideoTrack && track.muted) {
+      track.unmute(stopOnMute: false).catchError((Object _) => false);
+    }
+    _cameraMutedByFallback = false;
+    _savedBitrates.clear();
+    if (_localInEffect != AppFallbackOption.none) {
+      _localInEffect = AppFallbackOption.none;
+      if (!_fallbackState.isClosed) {
+        _fallbackState.add(const AppFallbackState(isLocal: true, state: AppFallbackOption.none));
+      }
+    }
+  }
+
+  void _resetFallbackState() {
+    _downlinkHysteresis.reset();
+    _uplinkHysteresis.reset();
+    _lowered.clear();
+    _disabledByFallback.clear();
+    _savedBitrates.clear();
+    _cameraMutedByFallback = false;
+    _remoteInEffect = AppFallbackOption.none;
+    _localInEffect = AppFallbackOption.none;
+  }
+
+  // ---- Network test ----
+
+  static AppNetworkQuality _qualityOf(lk.ConnectionQuality q) {
+    switch (q) {
+      case lk.ConnectionQuality.excellent:
+        return AppNetworkQuality.excellent;
+      case lk.ConnectionQuality.good:
+        return AppNetworkQuality.good;
+      case lk.ConnectionQuality.poor:
+        return AppNetworkQuality.poor;
+      case lk.ConnectionQuality.lost:
+        return AppNetworkQuality.lost;
+      case lk.ConnectionQuality.unknown:
+        return AppNetworkQuality.unknown;
+    }
+  }
+
+  /// Measure the network on a short, separate test connection (about 5 s,
+  /// 10 s at most) and call [callback] once with the result.
+  ///
+  /// Mint [token] for a throwaway channel (e.g. `nettest-<uid>`); the test
+  /// never touches the channel this engine is in, but running it before
+  /// [joinChannel] gives the cleanest numbers. Nothing is published, so loss
+  /// and jitter cover only what the test connection itself carries; uplink
+  /// and downlink quality both come from the server's grade of the test
+  /// connection.
+  Future<void> startNetworkTest(
+    String serverUrl,
+    String token,
+    void Function(AppNetworkTestResult result) callback,
+  ) async {
+    await stopNetworkTest();
+    final room = lk.Room();
+    _testRoom = room;
+    _testCallback = callback;
+    var worst = AppNetworkQuality.unknown;
+    var latest = AppNetworkQuality.unknown;
+    final listener = room.createListener()
+      ..on<lk.ParticipantConnectionQualityUpdatedEvent>((e) {
+        if (e.participant is! lk.LocalParticipant) return;
+        latest = _qualityOf(e.connectionQuality);
+        if (latest != AppNetworkQuality.unknown &&
+            (worst == AppNetworkQuality.unknown || latest.index > worst.index)) {
+          worst = latest;
+        }
+      });
+
+    Future<void> finish(AppNetworkTestResult r) async {
+      if (!identical(_testRoom, room)) return;
+      _testTimer?.cancel();
+      _testTimer = null;
+      final cb = _testCallback;
+      _testRoom = null;
+      _testCallback = null;
+      await listener.dispose();
+      try {
+        await room.disconnect();
+        await room.dispose();
+      } catch (_) {}
+      cb?.call(r);
+    }
+
+    _testTimer = Timer(const Duration(seconds: 10), () {
+      finish(const AppNetworkTestResult(error: 'network test timed out'));
+    });
+    try {
+      await room.connect(serverUrl, token).timeout(const Duration(seconds: 9));
+    } catch (e) {
+      await finish(AppNetworkTestResult(error: 'network test could not connect: $e'));
+      return;
+    }
+    await Future<void>.delayed(const Duration(seconds: 5));
+    if (!identical(_testRoom, room)) return;
+    final stats = await _transportStats(room);
+    final now = latest != AppNetworkQuality.unknown
+        ? latest
+        : _qualityOf(room.localParticipant?.connectionQuality ?? lk.ConnectionQuality.unknown);
+    final grade = worst != AppNetworkQuality.unknown && worst.index > now.index ? worst : now;
+    await finish(AppNetworkTestResult(
+      uplinkQuality: grade,
+      downlinkQuality: grade,
+      rttMs: stats.$1,
+      jitterMs: stats.$2,
+      uplinkLoss: stats.$3,
+      downlinkLoss: stats.$4,
+    ));
+  }
+
+  /// Cancel a running [startNetworkTest]; its callback is not called.
+  Future<void> stopNetworkTest() async {
+    _testTimer?.cancel();
+    _testTimer = null;
+    final room = _testRoom;
+    _testRoom = null;
+    _testCallback = null;
+    if (room == null) return;
+    try {
+      await room.disconnect();
+      await room.dispose();
+    } catch (_) {}
+  }
+
+  /// (rttMs, jitterMs, uplinkLoss, downlinkLoss) from the test connection's
+  /// transports. Best effort.
+  static Future<(int, int, double, double)> _transportStats(lk.Room room) async {
+    var rtt = -1;
+    var jitter = 0.0;
+    num sent = 0, sentLost = 0, received = 0, receivedLost = 0;
+    num toNum(dynamic v) => v is num ? v : num.tryParse('$v') ?? 0;
+    // The transports are not public API; reading their statistics is the only
+    // way to measure a connection that publishes nothing.
+    // ignore: invalid_use_of_internal_member
+    for (final t in [room.engine.publisher, room.engine.subscriber]) {
+      if (t == null) continue;
+      try {
+        final reports = await t.pc.getStats();
+        for (final r in reports) {
+          final v = r.values;
+          switch (r.type) {
+            case 'candidate-pair':
+              final cur = v['currentRoundTripTime'];
+              if ((v['nominated'] == true || v['state'] == 'succeeded') && cur != null) {
+                final ms = (toNum(cur) * 1000).round();
+                if (ms > 0 && (rtt < 0 || ms < rtt)) rtt = ms;
+              }
+            case 'outbound-rtp':
+              sent += toNum(v['packetsSent']);
+            case 'remote-inbound-rtp':
+              sentLost += toNum(v['packetsLost']);
+            case 'inbound-rtp':
+              received += toNum(v['packetsReceived']);
+              receivedLost += toNum(v['packetsLost']);
+              final j = toNum(v['jitter']) * 1000;
+              if (j > jitter) jitter = j.toDouble();
+          }
+        }
+      } catch (_) {
+        // Stats are best effort.
+      }
+    }
+    double ratio(num lost, num ok) => lost + ok > 0 ? (lost / (lost + ok)).clamp(0, 1).toDouble() : 0;
+    return (rtt, jitter.round(), ratio(sentLost, sent), ratio(receivedLost, received));
+  }
+
+
   /// Release all resources.
   Future<void> dispose() async {
+    await stopNetworkTest();
     await leaveChannel();
     await _listener?.dispose();
     await _userJoined.close();
@@ -1035,6 +1420,8 @@ class AppEngine {
     await _connectionStage.close();
     await _videoQuality.close();
     await _codecFallback.close();
+    await _fallbackState.close();
+    await _tokenWillExpire.close();
     await _room.dispose();
   }
 
@@ -1058,7 +1445,8 @@ class _DeviceReports {
     return t.isEmpty ? 'unknown' : t;
   }
 
-  static void send(String? token, String outcome, String codec, {String? fromCodec, String? toCodec}) {
+  static void send(String? token, String outcome, String codec,
+      {String? fromCodec, String? toCodec, String? region}) {
     if (token == null || token.isEmpty) return;
     () async {
       final client = io.HttpClient()..connectionTimeout = const Duration(seconds: 3);
@@ -1076,6 +1464,7 @@ class _DeviceReports {
           'outcome': outcome,
           if (fromCodec != null) 'fromCodec': fromCodec,
           if (toCodec != null) 'toCodec': toCodec,
+          if (region != null) 'region': region,
         };
         final req = await client.postUrl(Uri.parse('$_apiBase/sdk/device-report')).timeout(const Duration(seconds: 3));
         req.headers.set('Authorization', 'Bearer $token');

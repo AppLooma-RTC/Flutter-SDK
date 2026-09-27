@@ -169,10 +169,14 @@ class AppEngineOptions {
   final AppVideoConfig video;
   final AppAudioOptions audio;
 
+  /// Preferred server region; see [AppRegion].
+  final AppRegion region;
+
   const AppEngineOptions({
     this.audioScenario = AppAudioScenario.call,
     this.video = const AppVideoConfig(),
     this.audio = const AppAudioOptions(),
+    this.region = AppRegion.auto,
   });
 }
 
@@ -309,4 +313,116 @@ class AppVideoCodecFallback {
 
   @override
   String toString() => 'AppVideoCodecFallback($from -> $to, ${reason.value})';
+}
+
+/// Preferred server region for this engine.
+///
+/// Preparation for multi-region: the value is stored, logged at join and sent
+/// with the SDK's own reports. Today every region connects to the same server
+/// URL your token endpoint returns (`wsUrl`).
+enum AppRegion {
+  auto('auto'),
+  bd('bd'),
+  india('in'),
+  sa('sa'),
+  sg('sg'),
+  us('us');
+
+  const AppRegion(this.value);
+
+  /// The wire value, the same on every platform.
+  final String value;
+}
+
+/// Network quality grades, best to worst.
+enum AppNetworkQuality { excellent, good, poor, lost, unknown }
+
+/// What [AppEngine.startNetworkTest] measured. Delivered once.
+class AppNetworkTestResult {
+  final AppNetworkQuality uplinkQuality;
+  final AppNetworkQuality downlinkQuality;
+
+  /// Round-trip time to the server in ms; -1 when unknown.
+  final int rttMs;
+
+  /// Receive jitter in ms; 0 when nothing was received.
+  final int jitterMs;
+
+  /// Fraction of sent packets lost, 0..1.
+  final double uplinkLoss;
+
+  /// Fraction of received packets lost, 0..1.
+  final double downlinkLoss;
+
+  /// Null on success, otherwise why the test failed.
+  final String? error;
+
+  const AppNetworkTestResult({
+    this.uplinkQuality = AppNetworkQuality.unknown,
+    this.downlinkQuality = AppNetworkQuality.unknown,
+    this.rttMs = -1,
+    this.jitterMs = 0,
+    this.uplinkLoss = 0,
+    this.downlinkLoss = 0,
+    this.error,
+  });
+
+  @override
+  String toString() =>
+      'AppNetworkTestResult(up=${uplinkQuality.name} down=${downlinkQuality.name} rtt=${rttMs}ms '
+      'jitter=${jitterMs}ms upLoss=$uplinkLoss downLoss=$downlinkLoss error=$error)';
+}
+
+/// What to give up when the network is too weak. See
+/// [AppEngine.setRemoteSubscribeFallback] and [AppEngine.setLocalPublishFallback].
+enum AppFallbackOption { none, videoLowQuality, audioOnly }
+
+/// Delivered on `AppEngine.onFallbackStateChanged`: which fallback is now in
+/// effect ([AppFallbackOption.none] = restored).
+class AppFallbackState {
+  /// True for your own camera (uplink), false for remote video (downlink).
+  final bool isLocal;
+  final AppFallbackOption state;
+
+  const AppFallbackState({required this.isLocal, required this.state});
+
+  @override
+  String toString() => 'AppFallbackState(${isLocal ? 'local' : 'remote'}, ${state.name})';
+}
+
+/// Hysteresis for fallback: bad for >= 4 s falls back, good for >= 10 s
+/// restores. Pure; feed it one sample at a time.
+class AppFallbackHysteresis {
+  static const fallAfter = Duration(seconds: 4);
+  static const restoreAfter = Duration(seconds: 10);
+
+  bool _fallen = false;
+  DateTime? _badSince;
+  DateTime? _goodSince;
+
+  bool get isFallenBack => _fallen;
+
+  /// [bad]: poor/lost quality or loss above 10 %. [good]: good/excellent.
+  /// Neither (unknown) resets both clocks. Returns the new fallen-back state.
+  bool update({required bool bad, required bool good, required DateTime now}) {
+    if (bad) {
+      _goodSince = null;
+      final since = _badSince ??= now;
+      if (!_fallen && now.difference(since) >= fallAfter) _fallen = true;
+    } else if (good) {
+      _badSince = null;
+      final since = _goodSince ??= now;
+      if (_fallen && now.difference(since) >= restoreAfter) _fallen = false;
+    } else {
+      _badSince = null;
+      _goodSince = null;
+    }
+    return _fallen;
+  }
+
+  void reset() {
+    _fallen = false;
+    _badSince = null;
+    _goodSince = null;
+  }
 }

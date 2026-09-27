@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `AppEngineOptions.region` (`AppRegion.auto` default, `bd`, `india` = wire `in`, `sa`, `sg`, `us`). Logged at join and sent with device reports; preparation for multi-region — every region still connects to the `wsUrl` your token endpoint returns.
+- `startNetworkTest(serverUrl, token, callback)` / `stopNetworkTest()`: a ~5 s separate test connection (10 s timeout) reporting `AppNetworkTestResult { uplinkQuality, downlinkQuality, rttMs, jitterMs, uplinkLoss, downlinkLoss, error }` with `AppNetworkQuality`. Nothing is published, so both qualities come from the server's grade of the test connection. No echo test on Flutter yet.
+- `setRemoteSubscribeFallback` / `setLocalPublishFallback` with `AppFallbackOption { none, videoLowQuality, audioOnly }` and the `onFallbackStateChanged` stream of `AppFallbackState { isLocal, state }`. Poor/lost for 4 s falls back, good for 10 s restores (`AppFallbackHysteresis`).
+- `onTokenWillExpire` (about 30 s before the token's `exp`) and `renewToken(token)`.
+
 ## 0.3.5 — 2026-09-27
 
 - Automatic codec recovery. Viewer side: a subscribed, enabled remote camera that decodes no picture for more than 6 s while its sender has it on is reported to that publisher only, on a reserved internal data topic. Internal topics (prefix `_al.`) are never delivered to the app's message or data callbacks.
