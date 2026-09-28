@@ -174,10 +174,10 @@ class AppAudioOptions {
 
 /// Noise suppression mode.
 ///
-/// [clear] ("Clear Voice") is the stronger suppressor of the native Android
-/// and Web SDKs. Flutter has no access to the microphone post-processing
-/// stage, so on Flutter [clear] runs the same platform suppressor as
-/// [standard]; on iOS the platform's voice processing is already on in both.
+/// [clear] ("Clear Voice") adds a stronger spectral suppressor on the
+/// microphone's post-processing stage, after the standard one: steady noise
+/// (fans, hiss, hum, traffic) is removed far more strongly while speech
+/// passes. Android and iOS; on other platforms it acts like [standard].
 /// [off] turns suppression off.
 enum AppNoiseSuppression { standard, clear, off }
 

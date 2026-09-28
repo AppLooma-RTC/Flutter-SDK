@@ -8,6 +8,7 @@ import 'package:flutter/services.dart' show MethodChannel;
 
 import 'applooma_diag.dart';
 import 'applooma_types.dart';
+import 'applooma_video_enhance.dart' show appSetClearVoice;
 
 /// Our own frames travel on the same channel as customer data, tagged so the
 /// two never mix.
@@ -588,6 +589,7 @@ class AppEngine {
     }
     _joined = true;
     _diag.log('connected in ${_elapsed()} ms');
+    await _holdClearVoice(this.options.audio.effectiveNoiseSuppression == AppNoiseSuppression.clear);
     _connectionStage.add((AppConnectionStage.connected, null, _elapsed()));
 
     // Participants already in the room when we join never produce a
@@ -627,6 +629,24 @@ class AppEngine {
     _joined = false;
     _users.clear();
     _setProxyState(AppProxyState.direct, false);
+    await _holdClearVoice(false);
+  }
+
+  // ---- Clear Voice ----
+
+  /// Engines in a channel with [AppNoiseSuppression.clear]. The capture
+  /// post-processing stage is shared by every engine in the process, so it
+  /// stays on while any of them wants it.
+  static int _clearVoiceUsers = 0;
+  bool _clearVoiceHeld = false;
+
+  Future<void> _holdClearVoice(bool hold) async {
+    if (hold == _clearVoiceHeld) return;
+    _clearVoiceHeld = hold;
+    _clearVoiceUsers += hold ? 1 : -1;
+    final on = _clearVoiceUsers > 0;
+    final ok = await appSetClearVoice(on);
+    if (hold) _diagLog('clear voice ${ok ? 'on' : 'unavailable'}');
   }
 
   // ---- Cloud proxy ----

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Video Enhance now works on Android and iOS: `engine.setVideoEnhance(options)` applies skin smoothing, low-light boost, sharpening and warmth on the capture path (same filters as the native Android and iOS SDKs), follows the camera across off/on, switches and republishes, and returns true. New `engine.videoEnhance` getter. Web and desktop still return false.
+- Clear Voice now works on Android and iOS: `AppNoiseSuppression.clear` runs the spectral suppressor of the native Android SDK on the microphone's post-processing stage (about 10 ms added latency).
+- The package now contains native code (`android/`, `ios/`) and lists the media plugin it builds on as a direct dependency: do a full rebuild (and `pod install` on iOS) after upgrading.
+
 ## 0.3.8 — 2026-09-28
 
 - `AppVideoEnhance` and `engine.setVideoEnhance(options)` added for API parity; not yet available on Flutter (returns false, camera unchanged).
