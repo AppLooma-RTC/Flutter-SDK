@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.3.9 — 2026-09-28
+
+- Requires `applooma_rtc_core` ^2.12.1, the fixed core release: 2.12.0 did not compile on iOS, 2.12.1 does.
 
 - Video Enhance now works on Android and iOS: `engine.setVideoEnhance(options)` applies skin smoothing, low-light boost, sharpening and warmth on the capture path (same filters as the native Android and iOS SDKs), follows the camera across off/on, switches and republishes, and returns true. New `engine.videoEnhance` getter. Web and desktop still return false.
 - Clear Voice now works on Android and iOS: `AppNoiseSuppression.clear` runs the spectral suppressor of the native Android SDK on the microphone's post-processing stage (about 10 ms added latency).
