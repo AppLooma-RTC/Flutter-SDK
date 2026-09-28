@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.8 — 2026-09-28
 
 - `AppVideoEnhance` and `engine.setVideoEnhance(options)` added for API parity; not yet available on Flutter (returns false, camera unchanged).
 - `AppAudioOptions.noiseSuppressionMode` (`AppNoiseSuppression.standard` default, `clear`, `off`) for API parity; on Flutter `clear` runs the standard suppressor (no microphone post-processing stage is reachable from Dart).
