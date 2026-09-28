@@ -10,3 +10,4 @@ library;
 export 'src/applooma_engine.dart';
 export 'src/applooma_types.dart';
 export 'src/applooma_video_view.dart';
+export 'src/applooma_video_enhance.dart';

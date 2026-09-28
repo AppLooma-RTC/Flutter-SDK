@@ -156,11 +156,54 @@ class AppAudioOptions {
   final bool noiseSuppression;
   final bool autoGainControl;
 
+  /// Noise suppression mode, default [AppNoiseSuppression.standard].
+  /// `noiseSuppression: false` also means [AppNoiseSuppression.off].
+  final AppNoiseSuppression noiseSuppressionMode;
+
   const AppAudioOptions({
     this.echoCancellation = true,
     this.noiseSuppression = true,
     this.autoGainControl = true,
+    this.noiseSuppressionMode = AppNoiseSuppression.standard,
   });
+
+  /// The mode in force once [noiseSuppression] and [noiseSuppressionMode] are combined.
+  AppNoiseSuppression get effectiveNoiseSuppression =>
+      noiseSuppression ? noiseSuppressionMode : AppNoiseSuppression.off;
+}
+
+/// Noise suppression mode.
+///
+/// [clear] ("Clear Voice") is the stronger suppressor of the native Android
+/// and Web SDKs. Flutter has no access to the microphone post-processing
+/// stage, so on Flutter [clear] runs the same platform suppressor as
+/// [standard]; on iOS the platform's voice processing is already on in both.
+/// [off] turns suppression off.
+enum AppNoiseSuppression { standard, clear, off }
+
+/// How much delay an audience member accepts for smoother playback; see
+/// [AppEngineOptions.audienceLatency].
+enum AppAudienceLatency { ultraLow, low, standard }
+
+/// One video codec this device can handle, from
+/// [AppEngine.getSupportedVideoCodecs]. [mime] is for example `video/VP8` or
+/// `video/H264`.
+class AppVideoCodecCapability {
+  final String mime;
+
+  /// True when the codec runs on a hardware encoder. Derived: H.264 and
+  /// H.265 are only offered on hardware; for VP8, VP9 and AV1 the SDK cannot
+  /// tell from Flutter and reports false.
+  final bool hardware;
+  final bool encoder;
+  final bool decoder;
+
+  const AppVideoCodecCapability({required this.mime, required this.hardware, required this.encoder, required this.decoder});
+
+  Map<String, Object> toMap() => {'mime': mime, 'hardware': hardware, 'encoder': encoder, 'decoder': decoder};
+
+  @override
+  String toString() => 'AppVideoCodecCapability($mime, hardware: $hardware, encoder: $encoder, decoder: $decoder)';
 }
 
 /// Engine-wide settings. All optional; the defaults are what most apps want.
@@ -184,6 +227,15 @@ class AppEngineOptions {
   /// [AppCloudProxy.auto]. See `AppEngine.onProxyStateChanged`.
   final AppCloudProxy cloudProxy;
 
+  /// Audience latency tier, default [AppAudienceLatency.ultraLow]; applied
+  /// only while the local user is audience (not publishing). The Flutter
+  /// engine has no receive-side jitter-buffer control, so [AppAudienceLatency.low]
+  /// behaves like ultraLow, and [AppAudienceLatency.standard] only prefers
+  /// lower video layers under congestion (it turns on
+  /// `setRemoteSubscribeFallback(AppFallbackOption.videoLowQuality)` unless
+  /// you set a fallback yourself).
+  final AppAudienceLatency audienceLatency;
+
   const AppEngineOptions({
     this.audioScenario = AppAudioScenario.call,
     this.video = const AppVideoConfig(),
@@ -191,6 +243,7 @@ class AppEngineOptions {
     this.region = AppRegion.auto,
     this.remoteDiagnostics = true,
     this.cloudProxy = AppCloudProxy.auto,
+    this.audienceLatency = AppAudienceLatency.ultraLow,
   });
 }
 

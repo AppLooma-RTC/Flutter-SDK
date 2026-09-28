@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- `AppVideoEnhance` and `engine.setVideoEnhance(options)` added for API parity; not yet available on Flutter (returns false, camera unchanged).
+- `AppAudioOptions.noiseSuppressionMode` (`AppNoiseSuppression.standard` default, `clear`, `off`) for API parity; on Flutter `clear` runs the standard suppressor (no microphone post-processing stage is reachable from Dart).
+- Audience latency: `AppEngineOptions.audienceLatency` (`AppAudienceLatency.ultraLow` default, `low`, `standard`), applied only while audience. No receive-buffer control on Flutter: `low` behaves like `ultraLow`; `standard` turns on the `videoLowQuality` subscribe fallback unless the app set one.
+- Codec detection: `AppEngine.getSupportedVideoCodecs()` returns `AppVideoCodecCapability` (mime, hardware, encoder, decoder) from the media engine's capability lists; `hardware` is true for H.264 and H.265.
+
 ## 0.3.7 — 2026-09-28
 
 - Cloud proxy for restrictive networks: `AppEngineOptions.cloudProxy` (`AppCloudProxy.auto` default, `forceTls443`, `off`). `forceTls443` joins with relay-only transport through AppLooma's relay on TLS 443; `auto` retries a join once that way when the direct join fails with a connection or network timeout, and logs it. New `onProxyStateChanged` stream of `AppProxyStateChange { state, autoRetry }` (`AppProxyState.direct`, `connecting`, `connected`) and `proxyState`.

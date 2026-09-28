@@ -4,6 +4,7 @@ import 'dart:io' as io;
 
 import 'package:applooma_rtc_core/applooma_rtc_core.dart' as lk;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show MethodChannel;
 
 import 'applooma_diag.dart';
 import 'applooma_types.dart';
@@ -439,7 +440,7 @@ class AppEngine {
             : const lk.BackupVideoCodec(enabled: false),
       ),
       defaultAudioCaptureOptions: lk.AudioCaptureOptions(
-        noiseSuppression: o.audio.noiseSuppression,
+        noiseSuppression: o.audio.effectiveNoiseSuppression != AppNoiseSuppression.off,
         echoCancellation: o.audio.echoCancellation,
         autoGainControl: o.audio.autoGainControl,
       ),
@@ -489,6 +490,44 @@ class AppEngine {
   }
 
   /// Create an engine instance with your AppLooma RTC App ID.
+  /// The video codecs this device can send and receive, from the media
+  /// engine's own capability list. `hardware` is true for H.264 and H.265
+  /// (offered only on a hardware encoder) and false for the rest, which the
+  /// SDK cannot tell apart from Flutter. Empty on an unsupported platform.
+  static Future<List<AppVideoCodecCapability>> getSupportedVideoCodecs() async {
+    Future<Set<String>> mimes(String method) async {
+      try {
+        final r = await _mediaChannel.invokeMethod<dynamic>(method, <String, dynamic>{'kind': 'video'});
+        final codecs = (r is Map ? r['codecs'] : null) as List? ?? const [];
+        return codecs
+            .whereType<Map>()
+            .map((c) => (c['mimeType'] ?? '').toString())
+            .where((m) => m.startsWith('video/') && !const {'video/rtx', 'video/red', 'video/ulpfec', 'video/flexfec-03'}.contains(m.toLowerCase()))
+            .map((m) => m.toUpperCase().replaceFirst('VIDEO/', 'video/'))
+            .toSet();
+      } catch (_) {
+        return <String>{};
+      }
+    }
+
+    final enc = await mimes('getRtpSenderCapabilities');
+    final dec = await mimes('getRtpReceiverCapabilities');
+    const order = ['video/VP8', 'video/VP9', 'video/H264', 'video/H265', 'video/AV1'];
+    final all = {...enc, ...dec}.toList()..sort((a, b) => (order.indexOf(a) & 0xff).compareTo(order.indexOf(b) & 0xff));
+    return [
+      for (final m in all)
+        AppVideoCodecCapability(
+          mime: m,
+          hardware: enc.contains(m) && (m == 'video/H264' || m == 'video/H265'),
+          encoder: enc.contains(m),
+          decoder: dec.contains(m),
+        ),
+    ];
+  }
+
+  /// The media engine's own method channel (a contract with the engine plugin).
+  static const _mediaChannel = MethodChannel('FlutterWebRTC.Method');
+
   static AppEngine create({required String appId, AppEngineOptions options = const AppEngineOptions()}) {
     if (appId.isEmpty) {
       throw ArgumentError('AppEngine.create: appId is required');
@@ -556,6 +595,14 @@ class AppEngine {
     // live stream sees nobody and never receives the host's video.
     _seedExistingParticipants();
     _startStats();
+
+    // Audience latency: no receive-side jitter-buffer control here, so only
+    // STANDARD acts, by preferring lower video layers under congestion.
+    if (options.role == AppRole.audience &&
+        this.options.audienceLatency == AppAudienceLatency.standard &&
+        _remoteFallback == AppFallbackOption.none) {
+      _remoteFallback = AppFallbackOption.videoLowQuality;
+    }
 
     if (options.role != AppRole.audience) {
       if (options.microphone) {
