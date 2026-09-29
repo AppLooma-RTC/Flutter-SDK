@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Cloud proxy auto-retry no longer reports a disconnect to the app while it switches to the relay.
+
 ## 0.3.9 — 2026-09-28
 
 - Requires `applooma_rtc_core` ^2.12.1, the fixed core release: 2.12.0 did not compile on iOS, 2.12.1 does.

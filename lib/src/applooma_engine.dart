@@ -653,6 +653,9 @@ class AppEngine {
 
   AppProxyState _proxy = AppProxyState.direct;
 
+  /// True only while the failed direct attempt is torn down before a proxy retry.
+  bool _proxyRetrying = false;
+
   /// Current cloud proxy state; see [AppEngineOptions.cloudProxy].
   AppProxyState get proxyState => _proxy;
 
@@ -698,9 +701,18 @@ class AppEngine {
       if (mode != AppCloudProxy.auto || !isProxyRetryable(e)) rethrow;
       _diagLog('direct join failed ($e); retrying once through the cloud proxy on TLS 443');
       debugPrint('[AppLoomaRTC] Direct connection failed; retrying through the AppLooma cloud proxy (TLS 443)');
+      // Tear down the failed direct attempt without the app seeing a
+      // disconnect; the event is delivered asynchronously, so let it drain
+      // while the flag still hides it.
+      _proxyRetrying = true;
       try {
-        await _room.disconnect();
-      } catch (_) {}
+        try {
+          await _room.disconnect();
+        } catch (_) {}
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+      } finally {
+        _proxyRetrying = false;
+      }
       _setProxyState(AppProxyState.connecting, true);
       try {
         await _room.connect(wsUrl, token, connectOptions: relay);
@@ -1276,6 +1288,10 @@ class AppEngine {
         if (e.participant is lk.LocalParticipant) _localVideoChanged.add(null);
       })
       ..on<lk.RoomDisconnectedEvent>((e) {
+        if (_proxyRetrying) {
+          _diag.log('disconnect of the failed direct attempt ignored (retrying through the cloud proxy)');
+          return;
+        }
         _diag.log('disconnected reason=${e.reason?.name}');
         _diag.end('disconnected');
         _joined = false;
