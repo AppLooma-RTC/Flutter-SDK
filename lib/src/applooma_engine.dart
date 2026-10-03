@@ -415,9 +415,16 @@ class AppEngine {
       maxFramerate: o.video.fps,
     );
     final simulcast = o.video.simulcast ?? mode == AppVideoMode.adaptive;
-    final degradation = o.video.degradation == AppVideoDegradation.auto && mode != AppVideoMode.adaptive
-        ? AppVideoDegradation.keepResolution
-        : o.video.degradation;
+    // stableHd gives up a little resolution and frame rate while bandwidth
+    // ramps up; holding full size from the first second started live streams
+    // at a few frames per second. ultraHd4k still keeps resolution.
+    final degradation = o.video.degradation != AppVideoDegradation.auto
+        ? o.video.degradation
+        : mode == AppVideoMode.adaptive
+            ? AppVideoDegradation.auto
+            : mode == AppVideoMode.ultraHd4k
+                ? AppVideoDegradation.keepResolution
+                : AppVideoDegradation.balanced;
     return lk.RoomOptions(
       // adaptive: adaptive stream down-shifts a remote layer for a small or
       // hidden view (good on weak links). stableHd / ultraHd4k turn it off so
@@ -1739,7 +1746,7 @@ typedef Uint8Array = Uint8List;
 /// Anonymous reports of how the video encoder behaved on this phone
 /// (POST /v1/sdk/device-report). Fire-and-forget; every error is swallowed.
 class _DeviceReports {
-  static const _sdkVersion = '0.3.10';
+  static const _sdkVersion = '0.3.11';
   static const _apiBase = 'https://api.applooma.dev/v1';
 
   static String _clean(String? s, int max) {

@@ -99,7 +99,7 @@ class AppVideoConfig {
   final AppVideoCodec codec;
 
   /// What to give up first under pressure. See [AppVideoDegradation].
-  /// auto = chosen by [mode] (keepResolution in stableHd and ultraHd4k).
+  /// auto = chosen by [mode] (balanced in stableHd, keepResolution in ultraHd4k).
   final AppVideoDegradation degradation;
 
   const AppVideoConfig({

@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name                = 'applooma_rtc'
-  s.version             = '0.3.10'
+  s.version             = '0.3.11'
   s.summary             = 'AppLooma RTC Flutter SDK: Video Enhance and Clear Voice on iOS.'
   s.description         = 'Native capture processing for the AppLooma RTC Flutter SDK.'
   s.homepage            = 'https://applooma.dev'

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.11 — 2026-10-03
+
+- `AppVideoMode.stableHd` now degrades `balanced` by default (was keepResolution). Holding full size while the bandwidth estimate ramped up started live streams at a few frames per second for their first 10-20 s; now the picture is smooth from the start and grows to full size as bandwidth allows. `ultra-hd-4k` still keeps resolution, and an explicit degradation setting is honoured.
+
 ## 0.3.10 — 2026-09-29
 
 - Cloud proxy auto-retry no longer reports a disconnect to the app while it switches to the relay.

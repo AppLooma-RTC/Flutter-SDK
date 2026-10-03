@@ -9,7 +9,7 @@ Full documentation: **https://docs.applooma.dev/sdk/flutter**
 
 ```yaml
 dependencies:
-  applooma_rtc: ^0.3.10
+  applooma_rtc: ^0.3.11
 ```
 
 ### Permissions
