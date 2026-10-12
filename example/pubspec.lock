@@ -7,15 +7,15 @@ packages:
       path: ".."
       relative: true
     source: path
-    version: "0.3.8"
+    version: "0.3.14"
   applooma_rtc_core:
     dependency: transitive
     description:
       name: applooma_rtc_core
-      sha256: "7bb60b93a12124032f34bbb7ba7a490f5a1233f117ceca5b11f9068bbd50ba28"
+      sha256: "9d66b8c7ad0f00c39ba4dc12ba006b3872340753f58e2f7fd5ac628b85ed2d72"
       url: "https://pub.dev"
     source: hosted
-    version: "2.12.0"
+    version: "2.12.3"
   args:
     dependency: transitive
     description:

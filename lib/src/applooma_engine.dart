@@ -554,6 +554,39 @@ class AppEngine {
 
   /// Join a channel with a token from your server
   /// (POST https://api.applooma.dev/v1/token → { token, wsUrl }).
+  static bool _isAppLoomaHost(String url) {
+    final h = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+    return h == 'applooma.dev' || h.endsWith('.applooma.dev');
+  }
+
+  /// Asks the API for the best media server for this device (2 s limit).
+  /// Never throws; falls back to [wsUrl].
+  Future<String> _resolveWsUrl(String token, String wsUrl) async {
+    if (!_isAppLoomaHost(wsUrl)) return wsUrl;
+    final client = io.HttpClient()..connectionTimeout = const Duration(seconds: 2);
+    try {
+      return await () async {
+        final req = await client.postUrl(Uri.parse('${_DeviceReports._apiBase}/rtc/route'));
+        req.headers.contentType = io.ContentType.json;
+        req.headers.set('Accept', 'application/json');
+        req.write(jsonEncode({'token': token}));
+        final res = await req.close();
+        final text = await res.transform(utf8.decoder).join();
+        if (res.statusCode != 200) return wsUrl;
+        final body = jsonDecode(text);
+        final next = body is Map ? body['wsUrl'] : null;
+        if (next is! String) return wsUrl;
+        final scheme = Uri.tryParse(next)?.scheme.toLowerCase();
+        if ((scheme != 'wss' && scheme != 'ws') || !_isAppLoomaHost(next)) return wsUrl;
+        return next;
+      }().timeout(const Duration(seconds: 2));
+    } catch (_) {
+      return wsUrl;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   Future<void> joinChannel({
     required String token,
     required String wsUrl,
@@ -586,6 +619,11 @@ class AppEngine {
     _wireEvents();
     // Auto-subscribe so an audience member (and every co-host) receives all
     // published tracks the moment they join.
+    if (options.smartRouting) {
+      final routed = await _resolveWsUrl(token, wsUrl);
+      if (routed != wsUrl) _diag.log('server ${Uri.parse(routed).host}');
+      wsUrl = routed;
+    }
     try {
       await _connectWithProxy(wsUrl, token);
     } catch (e) {
@@ -1755,7 +1793,7 @@ typedef Uint8Array = Uint8List;
 /// Anonymous reports of how the video encoder behaved on this phone
 /// (POST /v1/sdk/device-report). Fire-and-forget; every error is swallowed.
 class _DeviceReports {
-  static const _sdkVersion = '0.3.13';
+  static const _sdkVersion = '0.3.14';
   static const _apiBase = 'https://api.applooma.dev/v1';
 
   static String _clean(String? s, int max) {

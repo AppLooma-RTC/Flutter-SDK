@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.14 — 2026-10-12
+
+- Smart routing: `joinChannel` now asks AppLooma for the closest media server for this device before connecting (2 s limit; on any problem the `wsUrl` you passed is used). Only applies to `applooma.dev` URLs. Opt out with `AppJoinOptions(smartRouting: false)`.
+
 ## 0.3.13 — 2026-10-12
 
 - Errors from `joinChannel`, `enableCamera`, `enableMicrophone`, `switchCamera`, `enableScreenShare`, `sendData` and `sendMessage` are now thrown as `AppLoomaException` (`message`, `code`, `cause`), with transport-engine wording removed. `ArgumentError`/`StateError` for API misuse are unchanged.

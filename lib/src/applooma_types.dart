@@ -257,10 +257,16 @@ class AppJoinOptions {
   /// Auto-enable microphone on join (ignored for audience).
   final bool microphone;
 
+  /// Pick the closest media server for this device before connecting
+  /// (default true). Only applies to applooma.dev URLs; on any problem the
+  /// wsUrl you passed is used unchanged.
+  final bool smartRouting;
+
   const AppJoinOptions({
     this.role = AppRole.host,
     this.camera = false,
     this.microphone = true,
+    this.smartRouting = true,
   });
 }
 
