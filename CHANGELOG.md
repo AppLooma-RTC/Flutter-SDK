@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.12 — 2026-10-12
+
+- Android: joining no longer fails with "getAudioDeviceModule() on a null object reference" (transport core 2.12.2).
+- Android: on some phones the local preview stays blank under Flutter's Impeller renderer. Until that is fixed upstream, turn Impeller off in `AndroidManifest.xml` (see README, "Android setup").
+
 ## 0.3.11 — 2026-10-03
 
 - `AppVideoMode.stableHd` now degrades `balanced` by default (was keepResolution). Holding full size while the bandwidth estimate ramped up started live streams at a few frames per second for their first 10-20 s; now the picture is smooth from the start and grows to full size as bandwidth allows. `ultra-hd-4k` still keeps resolution, and an explicit degradation setting is honoured.

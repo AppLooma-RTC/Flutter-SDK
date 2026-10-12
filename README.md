@@ -43,6 +43,16 @@ running while the app is in the background.
 
 Without these the app terminates the first time it opens a device.
 
+## Android setup
+
+On some Android phones the camera preview stays blank under Flutter's Impeller
+renderer. Turn Impeller off inside `<application>` in
+`android/app/src/main/AndroidManifest.xml`:
+
+```xml
+<meta-data android:name="io.flutter.embedding.android.EnableImpeller" android:value="false" />
+```
+
 ## Quickstart
 
 Tokens come from **your** server. Your API secret must never ship inside an
