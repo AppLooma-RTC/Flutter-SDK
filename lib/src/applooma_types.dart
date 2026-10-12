@@ -515,3 +515,47 @@ class AppProxyStateChange {
   @override
   String toString() => 'AppProxyStateChange(${state.name}${autoRetry ? ', auto retry' : ''})';
 }
+
+/// Error thrown by AppLooma RTC calls such as `joinChannel`, `enableCamera`
+/// and `sendData`. [message] is safe to show to users; [cause] is the
+/// underlying error, for logging.
+class AppLoomaException implements Exception {
+  AppLoomaException(this.message, {this.code, this.cause});
+
+  /// Wraps [error] unless it already is an [AppLoomaException], an
+  /// [ArgumentError] or a [StateError] (those describe misuse of the API and
+  /// carry their own wording).
+  static Object wrap(Object error, {String? code}) {
+    if (error is AppLoomaException || error is ArgumentError || error is StateError) return error;
+    return AppLoomaException(cleanMessage(error), code: code ?? _codeFor(error), cause: error);
+  }
+
+  /// Text of [error] with the transport engine's own prefixes removed.
+  static String cleanMessage(Object error) {
+    var s = error.toString();
+    s = s.replaceAll(RegExp(r'^(AppLooma RTC error|Live' r'Kit Exception|Exception):\s*'), '');
+    s = s.replaceAll(RegExp(r'^\[(Live' r'Kit)?(\w*?)(Exception)?\]\s*'), '');
+    s = s.replaceAll(RegExp(r'Live' r'Kit', caseSensitive: false), 'AppLooma RTC');
+    s = s.replaceAll('SignalJoinResponseEvent', 'the server join response');
+    return s.isEmpty ? 'unknown error' : s;
+  }
+
+  static String? _codeFor(Object error) {
+    final m = RegExp(r'\[(?:Live' r'Kit)?(\w+?)Exception\]').firstMatch(error.toString());
+    final t = m?.group(1);
+    if (t == null || t.isEmpty) return null;
+    return t.replaceAllMapped(RegExp(r'(?<=[a-z0-9])([A-Z])'), (x) => '_${x[1]}').toLowerCase();
+  }
+
+  /// What went wrong, in AppLooma wording.
+  final String message;
+
+  /// Short machine-readable kind, e.g. `connect`, `media`, `track_create`.
+  final String? code;
+
+  /// The original error.
+  final Object? cause;
+
+  @override
+  String toString() => code == null ? 'AppLoomaException: $message' : 'AppLoomaException($code): $message';
+}

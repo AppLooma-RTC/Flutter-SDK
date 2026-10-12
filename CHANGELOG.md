@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.13 — 2026-10-12
+
+- Errors from `joinChannel`, `enableCamera`, `enableMicrophone`, `switchCamera`, `enableScreenShare`, `sendData` and `sendMessage` are now thrown as `AppLoomaException` (`message`, `code`, `cause`), with transport-engine wording removed. `ArgumentError`/`StateError` for API misuse are unchanged.
+- Transport core 2.12.3: neutral error and log text.
+
 ## 0.3.12 — 2026-10-12
 
 - Android: joining no longer fails with "getAudioDeviceModule() on a null object reference" (transport core 2.12.2).

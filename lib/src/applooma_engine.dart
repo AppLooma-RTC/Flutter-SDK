@@ -580,7 +580,7 @@ class AppEngine {
       try {
         await lk.AudioManager.instance.setAudioSessionOptions(_sessionOptions(this.options.audioScenario));
       } catch (e) {
-        debugPrint('[AppLoomaRTC] audio session: $e');
+        debugPrint('[AppLoomaRTC] audio session: ${AppLoomaException.cleanMessage(e)}');
       }
     }
     _wireEvents();
@@ -592,7 +592,7 @@ class AppEngine {
       _diag.log('join failed: ${e.runtimeType}: $e');
       _diag.problem('join_failed');
       _diag.end('join failed');
-      rethrow;
+      throw AppLoomaException.wrap(e);
     }
     _joined = true;
     _diag.log('connected in ${_elapsed()} ms');
@@ -814,17 +814,26 @@ class AppEngine {
   }
 
   // ---- Local media controls ----
-  Future<void> enableCamera([bool on = true]) async {
-    if (on) {
-      await _publishCamera();
-    } else {
-      await _room.localParticipant?.setCameraEnabled(false);
-    }
-    _localVideoChanged.add(null);
-  }
+  Future<void> enableCamera([bool on = true]) => _guard(() async {
+        if (on) {
+          await _publishCamera();
+        } else {
+          await _room.localParticipant?.setCameraEnabled(false);
+        }
+        _localVideoChanged.add(null);
+      });
 
-  Future<void> enableMicrophone([bool on = true]) async =>
-      _room.localParticipant?.setMicrophoneEnabled(on);
+  Future<void> enableMicrophone([bool on = true]) =>
+      _guard(() async => _room.localParticipant?.setMicrophoneEnabled(on));
+
+  /// Runs [body], rethrowing any transport error as an [AppLoomaException].
+  Future<T> _guard<T>(Future<T> Function() body) async {
+    try {
+      return await body();
+    } catch (e, st) {
+      Error.throwWithStackTrace(AppLoomaException.wrap(e), st);
+    }
+  }
 
   bool _backCamera = false;
 
@@ -834,12 +843,12 @@ class AppEngine {
     final track = localVideoTrack;
     if (track is! lk.LocalVideoTrack) return;
     _backCamera = !_backCamera;
-    await track.setCameraPosition(_backCamera ? lk.CameraPosition.back : lk.CameraPosition.front);
+    await _guard(() => track.setCameraPosition(_backCamera ? lk.CameraPosition.back : lk.CameraPosition.front));
     _localVideoChanged.add(null);
   }
 
-  Future<void> enableScreenShare([bool on = true]) async =>
-      _room.localParticipant?.setScreenShareEnabled(on);
+  Future<void> enableScreenShare([bool on = true]) =>
+      _guard(() async => _room.localParticipant?.setScreenShareEnabled(on));
 
   /// Route audio to the loudspeaker (true) or the earpiece (false). A
   /// connected Bluetooth or wired headset keeps priority either way — this only
@@ -852,7 +861,7 @@ class AppEngine {
     try {
       await lk.AudioManager.instance.setSpeakerOutputPreferred(on);
     } catch (e) {
-      debugPrint('[AppLoomaRTC] setSpeakerphone: $e');
+      debugPrint('[AppLoomaRTC] setSpeakerphone: ${AppLoomaException.cleanMessage(e)}');
     }
   }
 
@@ -903,10 +912,10 @@ class AppEngine {
 
   /// Broadcast raw bytes. Prefer [sendMessage] unless you need your own format.
   Future<void> sendData(List<int> data, {bool reliable = true}) async {
-    await _room.localParticipant?.publishData(
-      data,
-      reliable: reliable,
-    );
+    await _guard(() async => _room.localParticipant?.publishData(
+          data,
+          reliable: reliable,
+        ));
   }
 
   // ---- State ----
@@ -1631,7 +1640,7 @@ class AppEngine {
     try {
       await room.connect(serverUrl, token).timeout(const Duration(seconds: 9));
     } catch (e) {
-      await finish(AppNetworkTestResult(error: 'network test could not connect: $e'));
+      await finish(AppNetworkTestResult(error: 'network test could not connect: ${AppLoomaException.cleanMessage(e)}'));
       return;
     }
     await Future<void>.delayed(const Duration(seconds: 5));
@@ -1746,7 +1755,7 @@ typedef Uint8Array = Uint8List;
 /// Anonymous reports of how the video encoder behaved on this phone
 /// (POST /v1/sdk/device-report). Fire-and-forget; every error is swallowed.
 class _DeviceReports {
-  static const _sdkVersion = '0.3.12';
+  static const _sdkVersion = '0.3.13';
   static const _apiBase = 'https://api.applooma.dev/v1';
 
   static String _clean(String? s, int max) {
