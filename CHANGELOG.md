@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.15 — 2026-10-28
+
+- Android: audio routing during a call (start, stop, speaker and Bluetooth changes) can no longer crash the app. A phone that refuses a routing step now logs a warning and the call continues. Transport core 2.12.4.
+
 ## 0.3.14 — 2026-10-12
 
 - Smart routing: `joinChannel` now asks AppLooma for the closest media server for this device before connecting (2 s limit; on any problem the `wsUrl` you passed is used). Only applies to `applooma.dev` URLs. Opt out with `AppJoinOptions(smartRouting: false)`.
