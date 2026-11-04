@@ -9,7 +9,7 @@ Pod::Spec.new do |s|
   s.source              = { :path => '.' }
   s.source_files        = 'applooma_rtc/Sources/applooma_rtc/**/*.{h,m}'
   s.public_header_files = 'applooma_rtc/Sources/applooma_rtc/include/**/*.h'
-  s.platform            = :ios, '13.0'
+  s.platform            = :ios, '14.0'
   s.frameworks          = 'CoreImage', 'CoreVideo'
   s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
   s.static_framework    = true

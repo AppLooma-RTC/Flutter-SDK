@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0 — 2026-11-04
+
+- **Breaking:** minimum Android is now 7.0 (API 24) and the Android plugin compiles with Java 17; minimum iOS is now 14.0 (was 13.0), matching the native iOS SDK.
+- Your app should target Android API 36 (Google Play) and build iOS with Xcode 26 (App Store).
+- No Dart API changes from 0.3.16.
+
 ## 0.3.16 — 2026-11-04
 
 - `joinChannel` throws `AppLoomaException` with code `JOIN_ABANDONED` when `leaveChannel()` runs before it finishes; no cloud-proxy retry is started. A join that finishes after leave disconnects at once instead of pushing the same user's session out of the room.
