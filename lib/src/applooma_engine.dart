@@ -24,6 +24,44 @@ String _newId() =>
 /// Messages ride the same channel as the media, so they arrive with the same
 /// latency and need no second connection. Nothing is stored: a message reaches
 /// whoever is in the channel at the time.
+/// One message read back from stored chat (see [AppEngine.loadHistory]).
+class AppStoredMessage {
+  AppStoredMessage._({required this.id, required this.sender, this.senderName, this.text, this.data,
+      required this.kind, required this.deleted, required this.createdAt});
+
+  factory AppStoredMessage._fromJson(Map<String, dynamic> m) => AppStoredMessage._(
+        id: m['id'] as String? ?? '',
+        sender: m['sender'] as String? ?? '',
+        senderName: m['senderName'] as String?,
+        text: m['text'] as String?,
+        data: (m['data'] as Map?)?.cast<String, dynamic>(),
+        kind: m['kind'] as String? ?? 'text',
+        deleted: m['deleted'] == true,
+        createdAt: DateTime.tryParse(m['createdAt'] as String? ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0),
+      );
+
+  final String id;
+  /// Who sent it, in your own identity space.
+  final String sender;
+  /// Their display name when they sent it.
+  final String? senderName;
+  /// Null when the message was recalled.
+  final String? text;
+  final Map<String, dynamic>? data;
+  final String kind;
+  /// True for a recalled message. It keeps its place in the thread.
+  final bool deleted;
+  /// Server time, safe to order by.
+  final DateTime createdAt;
+}
+
+/// One page of stored chat, newest first. [nextBefore] is null when there is no older page.
+class AppHistoryPage {
+  const AppHistoryPage({required this.messages, this.nextBefore});
+  final List<AppStoredMessage> messages;
+  final DateTime? nextBefore;
+}
+
 class AppMessage {
   /// Unique to this message. Useful as a list key and for de-duplicating.
   final String id;
@@ -624,13 +662,28 @@ class AppEngine {
       if (routed != wsUrl) _diag.log('server ${Uri.parse(routed).host}');
       wsUrl = routed;
     }
+    final epoch = _joinEpoch;
     try {
-      await _connectWithProxy(wsUrl, token);
+      await _connectWithProxy(wsUrl, token, epoch);
     } catch (e) {
+      if (epoch != _joinEpoch) {
+        // leaveChannel() was called before the join finished: the user left.
+        _diag.log('join abandoned: left before connected');
+        throw AppLoomaException('Left the channel before the join finished', code: 'JOIN_ABANDONED', cause: e);
+      }
       _diag.log('join failed: ${e.runtimeType}: $e');
       _diag.problem('join_failed');
       _diag.end('join failed');
       throw AppLoomaException.wrap(e);
+    }
+    if (epoch != _joinEpoch) {
+      // Left while the connect was finishing: do not stay in the room as a
+      // second copy of this user (it would push the real session out).
+      _diag.log('join abandoned: left while connecting; disconnecting');
+      try {
+        await _room.disconnect();
+      } catch (_) {}
+      throw AppLoomaException('Left the channel before the join finished', code: 'JOIN_ABANDONED');
     }
     _joined = true;
     _diag.log('connected in ${_elapsed()} ms');
@@ -664,7 +717,11 @@ class AppEngine {
     }
   }
 
+  /// Bumped by leaveChannel(); a join that sees it change was abandoned, not failed.
+  int _joinEpoch = 0;
+
   Future<void> leaveChannel() async {
+    _joinEpoch++;
     _diag.end('leave');
     _tokenTimer?.cancel();
     _tokenTimer = null;
@@ -722,7 +779,7 @@ class AppEngine {
     return RegExp(r'time[d ]?out|network|transport|\bice\b|connection|connect|unreachable|socket|peer', caseSensitive: false).hasMatch(text);
   }
 
-  Future<void> _connectWithProxy(String wsUrl, String token) async {
+  Future<void> _connectWithProxy(String wsUrl, String token, [int? epoch]) async {
     final mode = options.cloudProxy;
     // Relay-only: media goes through the relay the server hands out (TLS on 443).
     const relay = lk.ConnectOptions(
@@ -743,7 +800,7 @@ class AppEngine {
     try {
       await _room.connect(wsUrl, token, connectOptions: const lk.ConnectOptions(autoSubscribe: true));
     } catch (e) {
-      if (mode != AppCloudProxy.auto || !isProxyRetryable(e)) rethrow;
+      if (mode != AppCloudProxy.auto || (epoch != null && epoch != _joinEpoch) || !isProxyRetryable(e)) rethrow;
       _diagLog('direct join failed ($e); retrying once through the cloud proxy on TLS 443');
       debugPrint('[AppLoomaRTC] Direct connection failed; retrying through the AppLooma cloud proxy (TLS 443)');
       // Tear down the failed direct attempt without the app seeing a
@@ -923,6 +980,48 @@ class AppEngine {
   ///
   /// Pass [text] for a comment or [data] for anything structured. Nothing is
   /// stored, so a message reaches whoever is present when it is sent.
+  /// Reads stored chat for the channel you joined, newest first. Only
+  /// messages your server stored through the chat API are returned;
+  /// [sendMessage] is not stored. Uses the join token, so no server of yours
+  /// is involved. Pass [AppHistoryPage.nextBefore] as [before] for the older
+  /// page. Throws [AppLoomaException] (code `CHAT_NOT_IN_PLAN` when the plan
+  /// has no stored chat).
+  Future<AppHistoryPage> loadHistory({int? limit, DateTime? before}) async {
+    final token = _joinToken;
+    if (token == null) throw StateError('Join a channel before loading its history');
+    final query = <String, String>{
+      if (limit != null) 'limit': '$limit',
+      if (before != null) 'before': before.toUtc().toIso8601String(),
+    };
+    final uri = Uri.parse('${_DeviceReports._apiBase}/chat/history').replace(queryParameters: query.isEmpty ? null : query);
+    final client = io.HttpClient()..connectionTimeout = const Duration(seconds: 10);
+    try {
+      final req = await client.getUrl(uri);
+      req.headers.set('Authorization', 'Bearer $token');
+      final res = await req.close().timeout(const Duration(seconds: 15));
+      final text = await res.transform(utf8.decoder).join();
+      Map<String, dynamic> body;
+      try {
+        body = (jsonDecode(text) as Map).cast<String, dynamic>();
+      } catch (_) {
+        body = <String, dynamic>{};
+      }
+      if (res.statusCode < 200 || res.statusCode > 299) {
+        throw AppLoomaException(
+          (body['error'] as String?) ?? 'Could not load history (${res.statusCode})',
+          code: (body['code'] as String?) ?? 'HISTORY_FAILED',
+        );
+      }
+      final list = (body['messages'] as List?) ?? const [];
+      return AppHistoryPage(
+        messages: list.map((m) => AppStoredMessage._fromJson((m as Map).cast<String, dynamic>())).toList(),
+        nextBefore: body['nextBefore'] == null ? null : DateTime.parse(body['nextBefore'] as String),
+      );
+    } finally {
+      client.close();
+    }
+  }
+
   Future<AppMessage> sendMessage({
     String? text,
     Map<String, dynamic>? data,
@@ -1793,7 +1892,7 @@ typedef Uint8Array = Uint8List;
 /// Anonymous reports of how the video encoder behaved on this phone
 /// (POST /v1/sdk/device-report). Fire-and-forget; every error is swallowed.
 class _DeviceReports {
-  static const _sdkVersion = '0.3.15';
+  static const _sdkVersion = '0.3.16';
   static const _apiBase = 'https://api.applooma.dev/v1';
 
   static String _clean(String? s, int max) {

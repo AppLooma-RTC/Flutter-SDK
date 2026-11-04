@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.16 — 2026-11-04
+
+- `joinChannel` throws `AppLoomaException` with code `JOIN_ABANDONED` when `leaveChannel()` runs before it finishes; no cloud-proxy retry is started. A join that finishes after leave disconnects at once instead of pushing the same user's session out of the room.
+- Stored chat: `loadHistory(limit:, before:)` returns `AppHistoryPage` (`AppStoredMessage` list, `nextBefore`), using the join token.
+
 ## 0.3.15 — 2026-10-28
 
 - Android: audio routing during a call (start, stop, speaker and Bluetooth changes) can no longer crash the app. A phone that refuses a routing step now logs a warning and the call continues. Transport core 2.12.4.
