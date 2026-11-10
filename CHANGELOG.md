@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 — 2026-11-11
+
+- `onUserLeftWithReason` now carries the server's real reason (`quit`, `kicked`, `duplicateIdentity`, `roomClosed`, `dropped`) via `applooma_rtc_core` 2.13.2. Only unexplained drops are held for the grace period.
+
 ## 0.5.0 — 2026-11-11
 
 - `onUserLeftWithReason` (`AppUserLeave` with `AppLeaveReason`), also `user.leaveReason`. The transport does not yet pass the server's reason for a remote leave, so this release reports `unknown` for an unexplained leave and `dropped` when the grace period ran out. `onUserLeft` still fires.

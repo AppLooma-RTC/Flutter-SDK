@@ -334,6 +334,27 @@ class AppEngine {
     }
   }
 
+  static AppLeaveReason _leaveReasonOf(String? name) {
+    switch (name) {
+      case 'CLIENT_INITIATED': return AppLeaveReason.quit;
+      case 'SIGNAL_CLOSE':
+      case 'STATE_MISMATCH':
+      case 'CONNECTION_TIMEOUT':
+      case 'MIGRATION':
+      case 'JOIN_FAILURE': return AppLeaveReason.dropped;
+      case 'PARTICIPANT_REMOVED': return AppLeaveReason.kicked;
+      case 'DUPLICATE_IDENTITY': return AppLeaveReason.duplicateIdentity;
+      case 'ROOM_DELETED':
+      case 'ROOM_CLOSED':
+      case 'SERVER_SHUTDOWN': return AppLeaveReason.roomClosed;
+      default: return AppLeaveReason.unknown;
+    }
+  }
+
+  /// Whether a leave with this reason may be a drop the user comes back from.
+  static bool _holdsForReturn(AppLeaveReason r) =>
+      r == AppLeaveReason.dropped || r == AppLeaveReason.unknown || r == AppLeaveReason.duplicateIdentity;
+
   void _deliverUserLeft(AppRemoteUser u, AppLeaveReason reason) {
     u.leaveReason = reason;
     _userLeft.add(u);
@@ -1585,11 +1606,10 @@ class AppEngine {
         }
         final u = _users[uid];
         if (u != null && identical(u._p, e.participant)) {
-          // The transport does not pass the server's reason for a remote leave;
-          // a clean leave and a drop look the same here, so hold for the grace period.
-          const reason = AppLeaveReason.unknown;
+          // The server's reason, kept on the participant by the transport core (2.13.2+).
+          final reason = _leaveReasonOf(e.participant.lastDisconnectReason?.name);
           final grace = options.remoteLeaveGraceMs;
-          if (grace > 0 && !_pendingLeaves.containsKey(uid)) {
+          if (grace > 0 && _holdsForReturn(reason) && !_pendingLeaves.containsKey(uid)) {
             _diag.log('user dropped uid=$uid; holding ${grace ~/ 1000} s');
             u.state = AppUserState.reconnecting;
             _pendingLeaves[uid] = Timer(Duration(milliseconds: grace), () => _expireLeave(uid));
@@ -2118,7 +2138,7 @@ typedef Uint8Array = Uint8List;
 /// Anonymous reports of how the video encoder behaved on this phone
 /// (POST /v1/sdk/device-report). Fire-and-forget; every error is swallowed.
 class _DeviceReports {
-  static const _sdkVersion = '0.5.0';
+  static const _sdkVersion = '0.5.1';
   static const _apiBase = 'https://api.applooma.dev/v1';
 
   static String _clean(String? s, int max) {
