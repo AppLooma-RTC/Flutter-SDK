@@ -1,8 +1,34 @@
 /// Roles supported by AppLooma RTC channels.
 enum AppRole { host, cohost, audience }
 
-/// Connection lifecycle states.
-enum AppConnectionState { connecting, connected, reconnecting, disconnected }
+/// Your own connection, as one state machine.
+enum AppConnectionState { connecting, connected, reconnecting, disconnected, failed }
+
+/// Why [AppEngine.onConnectionChanged] fired.
+enum AppConnectionReason {
+  joinSuccess, joinFailed, networkLost, networkRestored, tokenExpired,
+  kicked, duplicateIdentity, roomClosed, leaveChannel, unknown,
+}
+
+/// A connection state change with its reason.
+class AppConnectionChange {
+  final AppConnectionState state;
+  final AppConnectionReason reason;
+  const AppConnectionChange(this.state, this.reason);
+  @override
+  String toString() => 'AppConnectionChange($state, $reason)';
+}
+
+/// Why a remote user is no longer in the channel. [quit]: they left on
+/// purpose. [dropped]: their connection failed and did not come back within
+/// the grace period. [kicked]: your server removed them. [roomClosed]: the
+/// room ended. [unknown]: no reason was reported.
+enum AppLeaveReason { quit, dropped, kicked, duplicateIdentity, roomClosed, unknown }
+
+/// A remote user's presence: in the channel, or dropped and inside
+/// [AppEngineOptions.remoteLeaveGraceMs].
+enum AppUserState { active, reconnecting }
+
 
 /// Milestones on the way to seeing a remote picture, each with elapsed
 /// milliseconds since [AppEngine.joinChannel].
@@ -236,6 +262,13 @@ class AppEngineOptions {
   /// you set a fallback yourself).
   final AppAudienceLatency audienceLatency;
 
+  /// How long a remote user whose connection dropped is kept in the roster as
+  /// [AppUserState.reconnecting] before [AppEngine.onUserLeft] reports them as
+  /// [AppLeaveReason.dropped]. If they come back in time you get
+  /// [AppEngine.onUserStateChanged] active instead of a leave and a join.
+  /// 0 reports the leave at once. Since 0.5.0.
+  final int remoteLeaveGraceMs;
+
   const AppEngineOptions({
     this.audioScenario = AppAudioScenario.call,
     this.video = const AppVideoConfig(),
@@ -244,6 +277,7 @@ class AppEngineOptions {
     this.remoteDiagnostics = true,
     this.cloudProxy = AppCloudProxy.auto,
     this.audienceLatency = AppAudienceLatency.ultraLow,
+    this.remoteLeaveGraceMs = 20000,
   });
 }
 

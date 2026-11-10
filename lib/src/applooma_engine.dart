@@ -88,9 +88,44 @@ class AppMessage {
 }
 
 /// A remote user in the channel.
+/// A remote user's state change ([AppEngine.onUserStateChanged]).
+class AppUserStateChange {
+  final AppRemoteUser user;
+  final AppUserState state;
+  const AppUserStateChange(this.user, this.state);
+}
+
+/// A remote user's role change ([AppEngine.onUserRoleChanged]).
+class AppUserRoleChange {
+  final AppRemoteUser user;
+  final AppRole oldRole;
+  final AppRole newRole;
+  const AppUserRoleChange(this.user, this.oldRole, this.newRole);
+}
+
+/// A remote user's leave with its reason ([AppEngine.onUserLeftWithReason]).
+class AppUserLeave {
+  final AppRemoteUser user;
+  final AppLeaveReason reason;
+  const AppUserLeave(this.user, this.reason);
+}
+
 class AppRemoteUser {
-  final lk.RemoteParticipant _p;
+  lk.RemoteParticipant _p;
   AppRemoteUser._(this._p);
+
+  /// Rebound when the same identity comes back after a drop (new transport participant, same user).
+  void _rebind(lk.RemoteParticipant p) => _p = p;
+
+  /// The role last reported to the app, to tell a real change from a metadata rewrite.
+  AppRole? _lastKnownRole;
+
+  /// Why this user left, once they have. Null while they are in the channel.
+  AppLeaveReason? leaveReason;
+
+  /// [AppUserState.active], or [AppUserState.reconnecting] while their dropped
+  /// connection is inside the grace period.
+  AppUserState state = AppUserState.active;
 
   String get uid => _p.identity;
   String? get displayName => _p.name;
@@ -198,7 +233,17 @@ class AppEngine {
   // Event streams
   final _userJoined = StreamController<AppRemoteUser>.broadcast();
   final _userLeft = StreamController<AppRemoteUser>.broadcast();
+  final _userLeftWithReason = StreamController<AppUserLeave>.broadcast();
+  final _userStateChanged = StreamController<AppUserStateChange>.broadcast();
+  final _userRoleChanged = StreamController<AppUserRoleChange>.broadcast();
+  final _usersResynced = StreamController<List<AppRemoteUser>>.broadcast();
   final _connectionState = StreamController<AppConnectionState>.broadcast();
+  final _connectionChanged = StreamController<AppConnectionChange>.broadcast();
+  AppConnectionState _connectionStateNow = AppConnectionState.disconnected;
+  /// Remote users whose connection dropped and who are still inside remoteLeaveGraceMs.
+  final _pendingLeaves = <String, Timer>{};
+  /// True between reconnecting and reconnected: remote "disconnects" in that window are the transport's, not the users'.
+  bool _rosterFrozen = false;
   final _dataReceived = StreamController<(Uint8Array, AppRemoteUser?)>.broadcast();
   final _activeSpeakers = StreamController<List<String>>.broadcast();
   final _trackSubscribed = StreamController<AppRemoteUser>.broadcast();
@@ -245,8 +290,134 @@ class AppEngine {
   void Function(AppNetworkTestResult)? _testCallback;
 
   Stream<AppRemoteUser> get onUserJoined => _userJoined.stream;
+  /// A remote user left. Not fired when *your own* connection drops. See also [onUserLeftWithReason].
   Stream<AppRemoteUser> get onUserLeft => _userLeft.stream;
+  /// A remote user left, with why: [AppLeaveReason.quit] means on purpose,
+  /// [AppLeaveReason.dropped] that their network failed for longer than the grace period.
+  Stream<AppUserLeave> get onUserLeftWithReason => _userLeftWithReason.stream;
+  /// A remote user's connection dropped ([AppUserState.reconnecting]) or came
+  /// back ([AppUserState.active]) within [AppEngineOptions.remoteLeaveGraceMs].
+  /// Show "weak network" on their tile; if they do not come back, [onUserLeft] follows.
+  Stream<AppUserStateChange> get onUserStateChanged => _userStateChanged.stream;
+  /// Another user's role changed without them leaving (promoted or demoted by your server).
+  Stream<AppUserRoleChange> get onUserRoleChanged => _userRoleChanged.stream;
+  /// After a reconnect: who is in the channel now. People who stayed are not announced again.
+  Stream<List<AppRemoteUser>> get onUsersResynced => _usersResynced.stream;
   Stream<AppConnectionState> get onConnectionStateChanged => _connectionState.stream;
+  /// Your own connection as one state machine, with why it changed:
+  /// [AppConnectionReason.tokenExpired] means mint a new token,
+  /// [AppConnectionReason.kicked] means your server removed you,
+  /// [AppConnectionReason.networkLost] means show "Reconnecting…".
+  Stream<AppConnectionChange> get onConnectionChanged => _connectionChanged.stream;
+  /// The current connection state.
+  AppConnectionState get connectionState => _connectionStateNow;
+
+  void _setConnectionState(AppConnectionState state, AppConnectionReason reason) {
+    if (_connectionStateNow == state && state != AppConnectionState.connected) return;
+    _connectionStateNow = state;
+    _diag.log('connection $state reason=$reason');
+    _connectionState.add(state);
+    _connectionChanged.add(AppConnectionChange(state, reason));
+  }
+
+  static AppConnectionReason _connectionReasonOf(lk.DisconnectReason? r) {
+    switch (r) {
+      case lk.DisconnectReason.clientInitiated: return AppConnectionReason.leaveChannel;
+      case lk.DisconnectReason.duplicateIdentity: return AppConnectionReason.duplicateIdentity;
+      case lk.DisconnectReason.participantRemoved: return AppConnectionReason.kicked;
+      case lk.DisconnectReason.roomDeleted:
+      case lk.DisconnectReason.serverShutdown: return AppConnectionReason.roomClosed;
+      case lk.DisconnectReason.stateMismatch:
+      case lk.DisconnectReason.signalClose: return AppConnectionReason.networkLost;
+      case lk.DisconnectReason.joinFailure: return AppConnectionReason.joinFailed;
+      default: return AppConnectionReason.unknown;
+    }
+  }
+
+  void _deliverUserLeft(AppRemoteUser u, AppLeaveReason reason) {
+    u.leaveReason = reason;
+    _userLeft.add(u);
+    _userLeftWithReason.add(AppUserLeave(u, reason));
+  }
+
+  /// The grace period ran out: the dropped user is gone for real.
+  void _expireLeave(String uid) {
+    _pendingLeaves.remove(uid);
+    final u = _users.remove(uid);
+    if (u == null) return;
+    _unwatch(uid);
+    _diag.log('user left after grace uid=$uid');
+    _deliverUserLeft(u, AppLeaveReason.dropped);
+    _audienceChanged.add(audience);
+  }
+
+  /// A dropped user came back on a new transport participant: same person, no leave, no join.
+  void _resumeUser(AppRemoteUser u, lk.RemoteParticipant p) {
+    _pendingLeaves.remove(u.uid)?.cancel();
+    u._rebind(p);
+    u.state = AppUserState.active;
+    u.leaveReason = null;
+    _diag.log('user back within grace uid=${u.uid}');
+    _userStateChanged.add(AppUserStateChange(u, AppUserState.active));
+    for (final pub in p.trackPublications.values) {
+      final t = pub.track;
+      if (t != null) {
+        _trackSubscribed.add(u);
+        _watchTrack(u, t);
+      }
+    }
+  }
+
+  void _cancelPendingLeaves() {
+    for (final t in _pendingLeaves.values) {
+      t.cancel();
+    }
+    _pendingLeaves.clear();
+  }
+
+  /// After a reconnect: report who left while we were away (dropped) and who
+  /// is new, without announcing again the people who stayed.
+  void _resyncAfterReconnect() {
+    final present = <String, lk.RemoteParticipant>{
+      for (final p in _room.remoteParticipants.values) p.identity: p,
+    };
+    for (final u in _users.values) {
+      final p = present[u.uid];
+      if (p != null && !identical(u._p, p)) u._rebind(p);
+    }
+    for (final uid in _pendingLeaves.keys.toList()) {
+      final u = _users[uid];
+      final p = present[uid];
+      if (u != null && p != null) {
+        _resumeUser(u, p);
+      } else {
+        _pendingLeaves.remove(uid)?.cancel();
+      }
+    }
+    final gone = _users.keys.where((uid) => !present.containsKey(uid)).toList();
+    final added = present.keys.where((uid) => !_users.containsKey(uid)).toList();
+    for (final uid in gone) {
+      final u = _users.remove(uid);
+      _unwatch(uid);
+      if (u != null) _deliverUserLeft(u, AppLeaveReason.dropped);
+    }
+    for (final uid in added) {
+      final p = present[uid]!;
+      final user = _userFor(p);
+      _userJoined.add(user);
+      for (final pub in p.trackPublications.values) {
+        final t = pub.track;
+        if (t != null) {
+          _trackSubscribed.add(user);
+          _watchTrack(user, t);
+        }
+      }
+    }
+    if (gone.isNotEmpty || added.isNotEmpty) {
+      _diag.log('resync after reconnect: gone=${gone.length} added=${added.length}');
+      _audienceChanged.add(audience);
+    }
+  }
 
   /// Someone sent a message with [sendMessage].
   Stream<AppMessage> get onMessage => _message.stream;
@@ -663,6 +834,7 @@ class AppEngine {
       wsUrl = routed;
     }
     final epoch = _joinEpoch;
+    _setConnectionState(AppConnectionState.connecting, AppConnectionReason.joinSuccess);
     try {
       await _connectWithProxy(wsUrl, token, epoch);
     } catch (e) {
@@ -674,6 +846,7 @@ class AppEngine {
       _diag.log('join failed: ${e.runtimeType}: $e');
       _diag.problem('join_failed');
       _diag.end('join failed');
+      _setConnectionState(AppConnectionState.failed, AppConnectionReason.joinFailed);
       throw AppLoomaException.wrap(e);
     }
     if (epoch != _joinEpoch) {
@@ -687,6 +860,7 @@ class AppEngine {
     }
     _joined = true;
     _diag.log('connected in ${_elapsed()} ms');
+    _setConnectionState(AppConnectionState.connected, AppConnectionReason.joinSuccess);
     await _holdClearVoice(this.options.audio.effectiveNoiseSuppression == AppNoiseSuppression.clear);
     _connectionStage.add((AppConnectionStage.connected, null, _elapsed()));
 
@@ -722,6 +896,8 @@ class AppEngine {
 
   Future<void> leaveChannel() async {
     _joinEpoch++;
+    _cancelPendingLeaves();
+    _setConnectionState(AppConnectionState.disconnected, AppConnectionReason.leaveChannel);
     _diag.end('leave');
     _tokenTimer?.cancel();
     _tokenTimer = null;
@@ -1388,32 +1564,71 @@ class AppEngine {
 
     listener
       ..on<lk.ParticipantConnectedEvent>((e) {
-        _userJoined.add(_userFor(e.participant));
+        final uid = e.participant.identity;
+        final pending = _pendingLeaves.containsKey(uid) ? _users[uid] : null;
+        if (pending != null) {
+          _resumeUser(pending, e.participant);
+        } else {
+          _diag.log('user joined uid=$uid');
+          _userJoined.add(_userFor(e.participant));
+        }
         _audienceChanged.add(audience);
       })
       ..on<lk.ParticipantDisconnectedEvent>((e) {
-        final u = _users.remove(e.participant.identity);
-        _unwatch(e.participant.identity);
-        if (u != null) _userLeft.add(u);
+        final uid = e.participant.identity;
+        if (_rosterFrozen) {
+          // While *we* are reconnecting the transport drops every remote
+          // participant and re-adds them on return. Nobody actually left;
+          // _resyncAfterReconnect reports whoever really did.
+          _diag.log('user disconnect during our reconnect held: uid=$uid');
+          return;
+        }
+        final u = _users[uid];
+        if (u != null && identical(u._p, e.participant)) {
+          // The transport does not pass the server's reason for a remote leave;
+          // a clean leave and a drop look the same here, so hold for the grace period.
+          const reason = AppLeaveReason.unknown;
+          final grace = options.remoteLeaveGraceMs;
+          if (grace > 0 && !_pendingLeaves.containsKey(uid)) {
+            _diag.log('user dropped uid=$uid; holding ${grace ~/ 1000} s');
+            u.state = AppUserState.reconnecting;
+            _pendingLeaves[uid] = Timer(Duration(milliseconds: grace), () => _expireLeave(uid));
+            _userStateChanged.add(AppUserStateChange(u, AppUserState.reconnecting));
+          } else {
+            _pendingLeaves.remove(uid)?.cancel();
+            _users.remove(uid);
+            _unwatch(uid);
+            _diag.log('user left uid=$uid reason=$reason');
+            _deliverUserLeft(u, reason);
+          }
+        }
         _audienceChanged.add(audience);
       })
-      ..on<lk.RoomConnectedEvent>((_) {
-        _connectionState.add(AppConnectionState.connected);
+      // A promotion or demotion rewrites the token metadata; for a remote
+      // user that is onUserRoleChanged.
+      ..on<lk.ParticipantMetadataUpdatedEvent>((e) {
+        final p = e.participant;
+        if (p is lk.RemoteParticipant) {
+          final u = _userFor(p);
+          final old = u._lastKnownRole ?? u.role;
+          final now = u.role;
+          u._lastKnownRole = now;
+          if (old != now) _userRoleChanged.add(AppUserRoleChange(u, old, now));
+          _audienceChanged.add(audience);
+        }
       })
       ..on<lk.RoomReconnectingEvent>((_) {
         _diag.log('reconnecting');
         _diag.reconnecting();
-        _connectionState.add(AppConnectionState.reconnecting);
+        _rosterFrozen = true;
+        _setConnectionState(AppConnectionState.reconnecting, AppConnectionReason.networkLost);
       })
       ..on<lk.RoomReconnectedEvent>((_) {
         _diag.log('reconnected');
-        // Track state can change while disconnected, so rebuild the roster.
-        for (final uid in _health.keys.toList()) {
-          _unwatch(uid);
-        }
-        _users.clear();
-        _seedExistingParticipants();
-        _connectionState.add(AppConnectionState.connected);
+        _rosterFrozen = false;
+        _resyncAfterReconnect();
+        _setConnectionState(AppConnectionState.connected, AppConnectionReason.networkRestored);
+        _usersResynced.add(List.unmodifiable(_users.values));
       })
       ..on<lk.TrackSubscribedEvent>((e) {
         final user = _userFor(e.participant);
@@ -1451,13 +1666,18 @@ class AppEngine {
         _tokenTimer?.cancel();
         _resetFallbackState();
         _stopStats();
-        // Report everyone as gone; a stale roster after a disconnect made
-        // remoteUsers wrong until the next join.
-        for (final u in _users.values) {
-          _userLeft.add(u);
-        }
+        // Our own connection ended; the others are most likely still in the
+        // channel, so nobody is reported as left. The roster is cleared so
+        // remoteUsers is not stale.
+        _rosterFrozen = false;
+        _cancelPendingLeaves();
         _users.clear();
-        _connectionState.add(AppConnectionState.disconnected);
+        var why = _connectionReasonOf(e.reason);
+        // A reconnect that gave up ends with no transport reason: it was the network.
+        if (why == AppConnectionReason.unknown && _connectionStateNow == AppConnectionState.reconnecting) {
+          why = AppConnectionReason.networkLost;
+        }
+        _setConnectionState(AppConnectionState.disconnected, why);
       })
       ..on<lk.DataReceivedEvent>((e) {
         // SDK-internal traffic never reaches the app.
@@ -1861,6 +2081,12 @@ class AppEngine {
     await _listener?.dispose();
     await _userJoined.close();
     await _userLeft.close();
+    await _userLeftWithReason.close();
+    await _userStateChanged.close();
+    await _userRoleChanged.close();
+    await _usersResynced.close();
+    await _connectionChanged.close();
+    _cancelPendingLeaves();
     await _connectionState.close();
     await _dataReceived.close();
     await _activeSpeakers.close();
@@ -1892,7 +2118,7 @@ typedef Uint8Array = Uint8List;
 /// Anonymous reports of how the video encoder behaved on this phone
 /// (POST /v1/sdk/device-report). Fire-and-forget; every error is swallowed.
 class _DeviceReports {
-  static const _sdkVersion = '0.4.0';
+  static const _sdkVersion = '0.5.0';
   static const _apiBase = 'https://api.applooma.dev/v1';
 
   static String _clean(String? s, int max) {

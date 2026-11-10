@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 — 2026-11-11
+
+- `onUserLeftWithReason` (`AppUserLeave` with `AppLeaveReason`), also `user.leaveReason`. The transport does not yet pass the server's reason for a remote leave, so this release reports `unknown` for an unexplained leave and `dropped` when the grace period ran out. `onUserLeft` still fires.
+- **Behaviour change:** when *your own* connection drops, the others are no longer reported through `onUserLeft`; you get `onConnectionStateChanged` `disconnected`.
+- `AppEngineOptions.remoteLeaveGraceMs` (default 20000) and `onUserStateChanged` (`AppUserState.reconnecting` / `active`); back in time → no leave/join pair; not back → `dropped`. 0 restores the old behaviour.
+- After a reconnect, people who stayed are not announced again; `onUsersResynced` carries the full roster.
+- `onUserRoleChanged` (`AppUserRoleChange`) when your server promotes or demotes someone else.
+- `onConnectionChanged` (`AppConnectionChange` with `AppConnectionReason`), `AppConnectionState.failed`, and `engine.connectionState`.
+
 ## 0.4.1 — 2026-11-11
 
 - No API changes. Built on `applooma_rtc_core` 2.13.0, whose Android plugin, Dart types and generated protocol files no longer carry a third-party engine name. Your `GeneratedPluginRegistrant` now registers `com.applooma.rtc.plugin.AppLoomaRtcPlugin`.
