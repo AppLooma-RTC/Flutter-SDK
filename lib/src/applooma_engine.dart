@@ -531,7 +531,7 @@ class AppEngine {
   /// device module — so the first engine's scenario seeds them, before connect.
   static Future<void> _ensurePlatformInit(AppAudioScenario s) {
     return _platformInit ??= _isMobile
-        ? lk.LiveKitClient.initialize(initialAudioSessionOptions: _sessionOptions(s))
+        ? lk.AppLoomaClient.initialize(initialAudioSessionOptions: _sessionOptions(s))
         : Future.value();
   }
 

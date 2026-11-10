@@ -2,7 +2,7 @@ name: applooma_rtc
 description: >-
   Real-time voice, video, live streaming and audio rooms for Flutter. Join
   channels with a token from your server, render participants and send data.
-version: 0.4.0
+version: 0.4.1
 
 homepage: https://applooma.dev
 repository: https://github.com/AppLooma-RTC/Flutter-SDK
@@ -27,7 +27,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  applooma_rtc_core: ^2.12.4
+  applooma_rtc_core: ^2.13.1
   # The media plugin the core is built on. Listed directly so the native half
   # of this package (android/, ios/) can attach to its capture hooks; the
   # version is whatever the core pins.

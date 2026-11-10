@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 — 2026-11-11
+
+- No API changes. Built on `applooma_rtc_core` 2.13.0, whose Android plugin, Dart types and generated protocol files no longer carry a third-party engine name. Your `GeneratedPluginRegistrant` now registers `com.applooma.rtc.plugin.AppLoomaRtcPlugin`.
+
 ## 0.4.0 — 2026-11-04
 
 - **Breaking:** minimum Android is now 7.0 (API 24) and the Android plugin compiles with Java 17; minimum iOS is now 14.0 (was 13.0), matching the native iOS SDK.
