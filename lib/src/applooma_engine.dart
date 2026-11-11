@@ -789,11 +789,34 @@ class AppEngine {
     return h == 'applooma.dev' || h.endsWith('.applooma.dev');
   }
 
-  /// Asks the API for the best media server for this device (2 s limit).
-  /// Never throws; falls back to [wsUrl].
+  /// Per attempt. The API answers in well under a second; a dead region no longer holds it.
+  static const routeTimeout = Duration(seconds: 3);
+  static const routeAttempts = 2;
+
+  /// Asks the API for the best media server for this device. Never throws;
+  /// falls back to [wsUrl]. Everyone in a channel must land on the same media
+  /// server and the API pins the room on the first routed join, so a device
+  /// that gives up on the route and connects to the token's URL can end up
+  /// alone on another server. The route is therefore tried twice and a final
+  /// failure is logged as a warning.
   Future<String> _resolveWsUrl(String token, String wsUrl) async {
     if (!_isAppLoomaHost(wsUrl)) return wsUrl;
-    final client = io.HttpClient()..connectionTimeout = const Duration(seconds: 2);
+    for (var attempt = 0; attempt < routeAttempts; attempt++) {
+      final r = await _routeOnce(token);
+      if (r == _routeRefused) return wsUrl;
+      if (r != null) return r;
+    }
+    debugPrint('[AppLoomaRTC] smart routing failed after $routeAttempts attempts; '
+        'connecting to the token\'s server. If others in this channel were routed elsewhere they will not see each other.');
+    _diagLog('warning: route failed; using the token\'s server');
+    return wsUrl;
+  }
+
+  static const _routeRefused = '\u0000refused';
+
+  /// One attempt: the routed URL, [_routeRefused] on a 4xx (retrying cannot help), or null on failure.
+  Future<String?> _routeOnce(String token) async {
+    final client = io.HttpClient()..connectionTimeout = routeTimeout;
     try {
       return await () async {
         final req = await client.postUrl(Uri.parse('${_DeviceReports._apiBase}/rtc/route'));
@@ -802,16 +825,17 @@ class AppEngine {
         req.write(jsonEncode({'token': token}));
         final res = await req.close();
         final text = await res.transform(utf8.decoder).join();
-        if (res.statusCode != 200) return wsUrl;
+        if (res.statusCode >= 400 && res.statusCode < 500) return _routeRefused;
+        if (res.statusCode != 200) return null;
         final body = jsonDecode(text);
         final next = body is Map ? body['wsUrl'] : null;
-        if (next is! String) return wsUrl;
+        if (next is! String) return null;
         final scheme = Uri.tryParse(next)?.scheme.toLowerCase();
-        if ((scheme != 'wss' && scheme != 'ws') || !_isAppLoomaHost(next)) return wsUrl;
+        if ((scheme != 'wss' && scheme != 'ws') || !_isAppLoomaHost(next)) return null;
         return next;
-      }().timeout(const Duration(seconds: 2));
+      }().timeout(routeTimeout);
     } catch (_) {
-      return wsUrl;
+      return null;
     } finally {
       client.close(force: true);
     }
@@ -1115,8 +1139,25 @@ class AppEngine {
         _localVideoChanged.add(null);
       });
 
-  Future<void> enableMicrophone([bool on = true]) =>
-      _guard(() async => _room.localParticipant?.setMicrophoneEnabled(on));
+  Future<void> enableMicrophone([bool on = true]) => _guard(() async {
+        final lp = _room.localParticipant;
+        if (lp == null) return;
+        if (on || !options.audio.releaseMicrophoneOnMute) {
+          await lp.setMicrophoneEnabled(on);
+          return;
+        }
+        // Real mute: unpublish and stop the track so the device is released.
+        lk.LocalTrackPublication? pub;
+        for (final p in lp.audioTrackPublications) {
+          if (p.source == lk.TrackSource.microphone) pub = p;
+        }
+        if (pub == null) {
+          await lp.setMicrophoneEnabled(false);
+          return;
+        }
+        await lp.removePublishedTrack(pub.sid);
+        _diagLog('microphone released (releaseMicrophoneOnMute)');
+      });
 
   /// Runs [body], rethrowing any transport error as an [AppLoomaException].
   Future<T> _guard<T>(Future<T> Function() body) async {

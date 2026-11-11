@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2 — 2026-11-11
+
+- Smart routing is tried twice with a 3 s wait each (was once, 2 s) and a final failure is logged as a warning instead of a silent fallback to the token's server. A slow route answer once put a host on one media server while the viewers were routed to another (Nur Live, 10 Nov). The API no longer waits on a media server that has stopped answering.
+- `releaseMicrophoneOnMute` in the audio options (default false): with it, `enableMicrophone(false)` unpublishes and stops the microphone track instead of muting it, so the recorder closes, the phone's microphone indicator goes off and another app can record; unmuting republishes in a few hundred milliseconds. Equivalent to Agora's `enableLocalAudio(false)`.
+
 ## 0.5.1 — 2026-11-11
 
 - `onUserLeftWithReason` now carries the server's real reason (`quit`, `kicked`, `duplicateIdentity`, `roomClosed`, `dropped`) via `applooma_rtc_core` 2.13.2. Only unexplained drops are held for the grace period.

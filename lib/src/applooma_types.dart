@@ -186,11 +186,20 @@ class AppAudioOptions {
   /// `noiseSuppression: false` also means [AppNoiseSuppression.off].
   final AppNoiseSuppression noiseSuppressionMode;
 
+  /// What `enableMicrophone(false)` does with the capture. `false` (default):
+  /// the track is muted and the microphone stays open, so unmuting is instant.
+  /// `true`: the microphone track is unpublished and stopped, which releases
+  /// the device: the phone's microphone indicator goes off and another app can
+  /// record while you are muted; unmuting republishes (a few hundred
+  /// milliseconds). The same as Agora's `enableLocalAudio(false)`. Since 0.5.2.
+  final bool releaseMicrophoneOnMute;
+
   const AppAudioOptions({
     this.echoCancellation = true,
     this.noiseSuppression = true,
     this.autoGainControl = true,
     this.noiseSuppressionMode = AppNoiseSuppression.standard,
+    this.releaseMicrophoneOnMute = false,
   });
 
   /// The mode in force once [noiseSuppression] and [noiseSuppressionMode] are combined.
