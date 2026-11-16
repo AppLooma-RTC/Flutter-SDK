@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.3 — 2026-11-16
+
+- Gift events are accepted only from the AppLooma server. A data frame of type `applooma.gift` published by a participant (anyone in a room may publish data) used to be reported as a real gift; it is now dropped.
+- The SDK version reported in telemetry and device config requests now matches the package version (it was one release behind).
+
 ## 0.5.2 — 2026-11-11
 
 - Smart routing is tried twice with a 3 s wait each (was once, 2 s) and a final failure is logged as a warning instead of a silent fallback to the token's server. A slow route answer once put a host on one media server while the viewers were routed to another (Nur Live, 10 Nov). The API no longer waits on a media server that has stopped answering.

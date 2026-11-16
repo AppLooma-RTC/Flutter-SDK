@@ -1775,6 +1775,13 @@ class AppEngine {
           return;
         }
         if (frame is Map && frame['type'] == _giftType) {
+          // Gifts are sent by the AppLooma server (POST /v1/gifts/send), which
+          // arrives with no participant. A frame of this type from a participant
+          // is a forgery (anyone in the room may publish data) and is dropped.
+          if (e.participant != null) {
+            _diagLog('dropped a gift frame sent by a participant');
+            return;
+          }
           final gift = AppGiftEvent.fromJson(Map<String, dynamic>.from(frame));
           if (gift != null) _giftReceived.add(gift);
           return;
@@ -2179,7 +2186,7 @@ typedef Uint8Array = Uint8List;
 /// Anonymous reports of how the video encoder behaved on this phone
 /// (POST /v1/sdk/device-report). Fire-and-forget; every error is swallowed.
 class _DeviceReports {
-  static const _sdkVersion = '0.5.1';
+  static const _sdkVersion = '0.5.3';
   static const _apiBase = 'https://api.applooma.dev/v1';
 
   static String _clean(String? s, int max) {
